@@ -1,0 +1,30 @@
+# Build output
+target/
+build/
+out/
+*.class
+*.jar
+
+# Gradle
+.gradle/
+
+# Editors / OS
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+.DS_Store
+
+# Credentials and key material. The README tells you to keep a CA bundle and, for mutual TLS, a
+# client certificate and key nearby — none of that belongs in a commit.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.log
+.env

@@ -1,0 +1,102 @@
+// Gradle build for the same artifact the pom.xml produces: io.github.epptools:epptools-sdk:1.1.1,
+// compiled for Java 8, with no dependencies of any kind.
+//
+//   gradle build                  compile and jar
+//   gradle publish -Prelease      sign and publish (see the signing block)
+
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'signing'
+}
+
+group = 'io.github.epptools'
+version = '1.1.1'
+description = "Dependency-free Java client for EPP domain registries (RFC 5730-5734 over TLS), " +
+        "with a registry's own extensions discovered from its greeting."
+
+// Without this the jar would be named after the directory (java-sdk-1.1.1.jar) and would not match
+// the Maven coordinates.
+base {
+    archivesName = 'epptools-sdk'
+}
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
+// No repositories and no dependencies: the library uses javax.net.ssl for the TLS transport and
+// javax.xml for DOM, both of which ship with the JDK.
+
+tasks.withType(JavaCompile).configureEach {
+    // release, not sourceCompatibility/targetCompatibility: it compiles against the Java 8 API as
+    // well as the Java 8 language level, so a newer JDK cannot slip a method that does not exist on
+    // 8 into the jar.
+    options.release = 8
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('jar') {
+    manifest {
+        // The module name for anyone building on the module path. Without it the name is derived from
+        // the jar's filename, which is not something this project promises: renaming the artefact
+        // would then break every `requires` that names it. Declared here rather than in a
+        // module-info.java, which a Java 8 target cannot carry.
+        attributes('Automatic-Module-Name': 'com.epptools.sdk')
+    }
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.source = '8'
+    // Every doclint check except the one that asks for a comment on each accessor: the short getters
+    // on Response are named after the EPP element they read and a paragraph each would say less than
+    // the name does.
+    options.addStringOption('Xdoclint:all,-missing', '-quiet')
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = 'epptools-sdk'
+            pom {
+                name = 'EppTools EPP SDK for Java'
+                description = project.description
+                url = 'https://github.com/epptools/java-sdk'
+                licenses {
+                    license {
+                        name = 'MIT License'
+                        url = 'https://opensource.org/licenses/MIT'
+                        distribution = 'repo'
+                    }
+                }
+                developers {
+                    developer {
+                        name = 'EppTools'
+                        url = 'https://github.com/epptools'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:https://github.com/epptools/java-sdk.git'
+                    developerConnection = 'scm:git:ssh://git@github.com/epptools/java-sdk.git'
+                    url = 'https://github.com/epptools/java-sdk'
+                    tag = 'v1.1.1'
+                }
+                issueManagement {
+                    system = 'GitHub Issues'
+                    url = 'https://github.com/epptools/java-sdk/issues'
+                }
+            }
+        }
+    }
+}
+
+signing {
+    // Maven Central requires a detached PGP signature for every artifact, and nothing else does, so
+    // a plain `gradle build` needs no key. Supply signing.keyId / signing.password /
+    // signing.secretKeyRingFile (or the in-memory equivalents) when publishing.
+    required = { gradle.taskGraph.allTasks.any { it.name.startsWith('publish') } }
+    sign publishing.publications.mavenJava
+}
