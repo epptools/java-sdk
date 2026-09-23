@@ -58,6 +58,13 @@ public final class Connection implements Transport {
 
     @Override
     public void open() {
+        // Close whatever is already here first. open() is documented as the way to start a fresh connection after a
+        // failure, and on a healthy connection it used to REPLACE the socket without closing it: the old one was
+        // left to the garbage collector, and with it the registry-side session, which counts against the per-
+        // registrar session limit until the server times it out. A few of those and the next login is refused 2502
+        // for connections nobody is using. Closing here is also what makes the reopen honest - after it there is
+        // one session, not two, and the frame offsets of the old stream cannot be mistaken for the new one's.
+        close();
         fatal = null; // a Connection may be reopened after a failure
         Socket raw = new Socket();
         try {
@@ -129,6 +136,11 @@ public final class Connection implements Transport {
             closeQuietly(sock);
             sock = null;
         }
+        // The streams go too. Left behind, they are handles onto a closed socket that pass the null test in
+        // usableOut(), so a write after close() failed as an IO error on a dead descriptor rather than saying
+        // "Not connected".
+        out = null;
+        in = null;
     }
 
     // --- TLS -------------------------------------------------------------------------------------------------

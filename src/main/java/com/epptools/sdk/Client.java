@@ -13,6 +13,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
 import java.util.regex.Matcher;
@@ -130,9 +131,9 @@ public final class Client implements AutoCloseable {
 
     /** Open the TLS socket and read the unsolicited greeting. */
     public Response connect() {
-        if (config.host == null || config.host.isEmpty()) {
-            throw new ConfigException("Config: host must not be empty");
-        }
+        // No host check here. Config's constructor is private and Config.Builder.build() already refuses an
+        // empty host, so a guard on this side could never fire - and a guard that cannot fire reads as
+        // coverage while proving nothing.
         if (!connection.isOpen()) {
             connection.open();
         }
@@ -157,11 +158,35 @@ public final class Client implements AutoCloseable {
         return greeting;
     }
 
-    /** Send hello; the server replies with a fresh greeting. */
+    /**
+     * Send hello; the server replies with a fresh greeting.
+     *
+     * This is the documented keep-alive, so it is the call a long-lived worker makes on a timer - which is why the
+     * reply is checked and, when it is not a greeting, the one already stored is left alone. Storing a
+     * &lt;response&gt; here would be worse than failing: a response advertises no services, so the next login()
+     * falls through to the DEFAULT service list, announcing services this server may not offer and losing the ones
+     * it does - the registry's own among them. From that point registryExtUri() answers null, a licence create, a
+     * forced host delete and balance() all throw, and change() stops arriving, with nothing in the log to say when
+     * it started.
+     */
     public Response hello() {
-        connection.writeFrame("<?xml version=\"1.0\" encoding=\"UTF-8\"?><epp xmlns=\"" + Namespaces.EPP
-                + "\"><hello/></epp>");
-        greeting = Response.fromXml(connection.readFrame());
+        String xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><epp xmlns=\"" + Namespaces.EPP
+                + "\"><hello/></epp>";
+        // Logged like every other frame. A hello cannot go through transact(), which would check a clTRID a hello
+        // does not carry and log a greeting's absent result code as a warning - but skipping the logging entirely
+        // left the one frame a worker sends most often invisible in a debug trace.
+        logDebug("EPP >> request " + xml);
+        connection.writeFrame(xml);
+        String raw = connection.readFrame();
+        logDebug("EPP << greeting " + raw);
+        Response fresh = Response.fromXml(raw);
+        if (!fresh.isGreeting()) {
+            throw new ConnectionException("Reply to <hello> from " + config.host + ":" + config.port
+                    + " is not an EPP <greeting> (result " + fresh.code() + ": "
+                    + (fresh.message() == null ? "no message" : fresh.message())
+                    + ") - the greeting already read is unchanged");
+        }
+        greeting = fresh;
         return greeting;
     }
 
@@ -175,11 +200,12 @@ public final class Client implements AutoCloseable {
      * password during login (RFC 5730 newPW).
      */
     public Response login(String newPassword) {
-        if (config.clid == null || config.clid.isEmpty() || config.password == null || config.password.isEmpty()) {
-            throw new ConfigException("login requires a non-empty clID and password (clID "
-                    + (config.clid != null && !config.clid.isEmpty() ? "set" : "EMPTY") + ", password "
-                    + (config.password != null && !config.password.isEmpty() ? "set" : "EMPTY")
-                    + ") - check your config");
+        // Only the password. The clID half of this guard could never be true: Config's constructor refuses an empty
+        // clID outright, and a Config is the only way to reach here, so a reader counting two protections was
+        // counting one - and looking in the wrong place for the one that fires. The password is a real case,
+        // because Config accepts an empty one and it is the <pw> element that then goes out empty.
+        if (config.password == null || config.password.isEmpty()) {
+            throw new ConfigException("login requires a non-empty password - check your config");
         }
         // Bounds that hold for every server are checked before connecting, so a misconfigured password never
         // opens a socket. Whether a password longer than PW_MAX is usable depends on the server advertising RFC
@@ -200,7 +226,15 @@ public final class Client implements AutoCloseable {
 
         List<String> greetingObj = greeting != null ? greeting.serviceObjUris() : new ArrayList<String>();
         List<String> greetingExt = greeting != null ? greeting.serviceExtUris() : new ArrayList<String>();
-        List<String> objUris = config.objUris != null ? config.objUris
+        // An EMPTY objUris list means "not configured", not "announce nothing". epp-1.0.xsd gives loginSvcType an
+        // objURI with minOccurs 1, so honouring an empty list writes no objURI at all and the login is refused
+        // outright - the least useful error in EPP, on the one command that has to succeed first. Treating it as
+        // absent is what a null already did, and what the greeting-mirroring path promises.
+        //
+        // An empty extUris keeps its meaning, which is to announce no extensions. That one is legitimate: svcExtension
+        // is itself optional, so the frame is valid, and a caller who wants a plain RFC session has no other way
+        // to ask for one.
+        List<String> objUris = config.objUris != null && !config.objUris.isEmpty() ? config.objUris
                 : (!greetingObj.isEmpty() ? greetingObj : Namespaces.DEFAULT_OBJ_URIS);
         List<String> extUris = config.extUris != null ? config.extUris
                 : (!greetingExt.isEmpty() ? greetingExt : Namespaces.DEFAULT_EXT_URIS);
@@ -262,8 +296,7 @@ public final class Client implements AutoCloseable {
             // desk asking "which client, on what" answers both from one login.
             frame.ns(ua, Namespaces.LOGINSEC, "loginSec:app", "EppTools Java SDK " + Version.VERSION);
             frame.ns(ua, Namespaces.LOGINSEC, "loginSec:tech", "Java " + System.getProperty("java.version"));
-            String os = System.getProperty("os.name");
-            frame.ns(ua, Namespaces.LOGINSEC, "loginSec:os", os == null || os.isEmpty() ? "unknown" : os);
+            frame.ns(ua, Namespaces.LOGINSEC, "loginSec:os", osDescription());
             if (relocatePw) {
                 frame.ns(block, Namespaces.LOGINSEC, "loginSec:pw", config.password);
             }
@@ -507,6 +540,31 @@ public final class Client implements AutoCloseable {
         }
     }
 
+    /**
+     * The operating system, as RFC 8807 asks for it: architecture, name and version.
+     *
+     * Section 3.1 wants the system "with version if available", such as "x86_64 Mac OS X 10.15.2", and the
+     * registrar manual shows the same shape, so the version is not dropped: it is what a support desk asking
+     * "which client, on what" is reading the field for. The four libraries cannot produce the same STRING here -
+     * on one Windows box the four runtimes report the architecture as amd64, AMD64 and x64, and the version as
+     * 10.0, 11 and 10.0.28000 - so the frame-parity tool masks this element, the way it masks the two beside it.
+     * Each part is skipped when the JVM does not report it rather than padded, so the value never carries an
+     * empty field.
+     */
+    static String osDescription() {
+        StringBuilder out = new StringBuilder();
+        for (String key : new String[]{"os.arch", "os.name", "os.version"}) {
+            String value = System.getProperty(key);
+            if (value != null && !value.trim().isEmpty()) {
+                if (out.length() > 0) {
+                    out.append(' ');
+                }
+                out.append(value.trim());
+            }
+        }
+        return out.length() == 0 ? "unknown" : out.toString();
+    }
+
     /** Mask passwords and authInfo (any namespace) before a frame is logged. */
     static String redact(String xml) {
         return REDACT.matcher(xml).replaceAll("$1***$3");
@@ -516,8 +574,16 @@ public final class Client implements AutoCloseable {
         tridCounter++;
         // A client transaction id that is easy to correlate in logs: prefix, a UTC timestamp, the per-process
         // token and a monotonic counter.
-        SimpleDateFormat fmt = new SimpleDateFormat("yyyyMMddHHmmss");
+        //
+        // Locale.ROOT on both, and this is the worst of the locale defaults rather than the most obvious. Without
+        // it the calendar and the digits are the JVM's: on a Thai default SimpleDateFormat writes the Buddhist year
+        // 2569 for 2026 and String.format writes the counter in Thai digits, and the result is a clTRID that PASSES
+        // the schema and reaches the registry. A refused frame would at least be a failure; this one succeeds while
+        // destroying the only thing a clTRID is for, which is matching a registry's record of a transform against
+        // yours - the reconciliation nobody runs until a charge is disputed.
+        SimpleDateFormat fmt = new SimpleDateFormat("yyyyMMddHHmmss", Locale.ROOT);
         fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
-        return String.format("%s-%s-%s-%04d", config.clTRIDPrefix, fmt.format(new Date()), processToken, tridCounter);
+        return String.format(Locale.ROOT, "%s-%s-%s-%04d",
+                config.clTRIDPrefix, fmt.format(new Date()), processToken, tridCounter);
     }
 }

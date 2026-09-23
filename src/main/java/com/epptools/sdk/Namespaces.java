@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
 /**
  * EPP namespace URIs - the exact strings that go on the wire.
  *
- * <p>Everything here is defined by an RFC and is the same string at every registry on earth. A registry's OWN
+ * Everything here is defined by an RFC and is the same string at every registry on earth. A registry's OWN
  * extensions are deliberately absent: a library that ships one registry's namespace as a constant is that
  * registry's client with the label filed off. Registry extensions are discovered from the {@code <greeting>}
  * instead - see {@link #registryExtension} / {@link #registryBalance}.

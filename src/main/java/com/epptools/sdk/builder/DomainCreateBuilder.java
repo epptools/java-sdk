@@ -77,9 +77,14 @@ public final class DomainCreateBuilder extends Builder {
         }
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("name", name);
+        // Trimmed and blank-dropped, as every other list step here is. This was the one that was not, and glue is
+        // where it shows: domain:hostAddr is minLength 3, so one empty string from a form refuses the whole
+        // registration with a bare 2001 that names no element.
         List<Object> addrs = new ArrayList<>();
         for (String a : addresses) {
-            addrs.add(a);
+            if (a != null && !a.trim().isEmpty()) {
+                addrs.add(a.trim());
+            }
         }
         entry.put("addresses", addrs);
         listIn(options, "nameservers").add(entry);

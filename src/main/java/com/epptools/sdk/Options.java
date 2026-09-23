@@ -8,6 +8,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -151,7 +152,10 @@ public final class Options {
     }
 
     private static String normalise(String key) {
-        return key.toLowerCase().replace("_", "").replace("-", "");
+        // Locale.ROOT: the option names are ASCII identifiers, and under a Turkish default the folding puts a
+        // dotless i in authInfo and secDNS, so "auth_info" no longer matches authInfo and the reader is told
+        // their key is unknown with no suggestion at all - on the JVM locale, not on what they typed.
+        return key.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
     }
 
     static int editDistance(String a, String b) {

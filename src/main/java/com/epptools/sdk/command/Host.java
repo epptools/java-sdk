@@ -40,9 +40,19 @@ public final class Host {
             Commands.aliases("removeAddresses", "remAddresses", "removeStatuses", "remStatuses");
 
     public Response check(List<String> names) {
+        // host:checkType requires at least one <host:name>, so an empty list builds a childless frame the registry
+        // refuses - and a caller reaches it by checking the nameservers a form did not carry.
+        // A blank name is refused, not dropped - see Commands.identifiers().
+        List<String> wanted = names == null || names.isEmpty()
+                ? java.util.Collections.<String>emptyList()
+                : Commands.identifiers(names, "host:check", "host:name");
+        if (wanted.isEmpty()) {
+            throw new ValidationException("host:check needs at least one name - RFC 5732 requires a <host:name> "
+                    + "child, so an empty list is a frame the registry refuses");
+        }
         Frame frame = client.frame();
         Element check = frame.ns(frame.verb("check"), H, "host:check");
-        for (String name : names) {
+        for (String name : wanted) {
             frame.ns(check, H, "host:name", name);
         }
         return client.request(frame);
@@ -60,10 +70,10 @@ public final class Host {
         Frame frame = client.frame();
         Element create = frame.ns(frame.verb("create"), H, "host:create");
         frame.ns(create, H, "host:name", name);
-        if (addresses != null) {
-            for (String ip : addresses) {
-                frame.ns(create, H, "host:addr", ip, single("ip", ipVersion(ip)));
-            }
+        // host:addrStringType is minLength 3, so a blank entry is a schema-refused frame - and an address list
+        // assembled from a form or split out of a config line is where a blank one comes from.
+        for (String ip : Commands.nonBlank(addresses)) {
+            frame.ns(create, H, "host:addr", ip, single("ip", ipVersion(ip)));
         }
         return client.request(frame);
     }
@@ -86,33 +96,6 @@ public final class Host {
         List<Object> addStatuses = asList(opt(options, "addStatuses"));
         List<Object> remStatuses = asList(opt(options, "remStatuses"));
 
-        Frame frame = client.frame();
-        Element update = frame.ns(frame.verb("update"), H, "host:update");
-        frame.ns(update, H, "host:name", name);
-        String[] ops = {"add", "rem"};
-        List<?>[] addrSets = {addAddresses, remAddresses};
-        List<?>[] statusSets = {addStatuses, remStatuses};
-        for (int i = 0; i < 2; i++) {
-            List<?> addrs = addrSets[i];
-            List<?> statuses = statusSets[i];
-            boolean hasAddrs = addrs != null && !addrs.isEmpty();
-            boolean hasStatuses = statuses != null && !statuses.isEmpty();
-            if (!hasAddrs && !hasStatuses) {
-                continue;
-            }
-            Element block = frame.ns(update, H, "host:" + ops[i]);
-            if (hasAddrs) {
-                for (Object ip : addrs) {
-                    String s = String.valueOf(ip);
-                    frame.ns(block, H, "host:addr", s, single("ip", ipVersion(s)));
-                }
-            }
-            if (hasStatuses) {
-                for (Object s : statuses) {
-                    frame.ns(block, H, "host:status", null, single("s", String.valueOf(s)));
-                }
-            }
-        }
         // Renaming is not supported by this registry: it reads only host:add and host:rem, so a host:chg is
         // discarded without comment. Sending one lets an address change in the same frame succeed while the
         // rename does not, and the caller is told 1000 - or, with newName alone, the frame carries no change
@@ -122,6 +105,50 @@ public final class Host {
         if (newName != null && !String.valueOf(newName).isEmpty()) {
             throw new ValidationException("host rename is not supported by this registry (host:chg is ignored) - "
                     + "create the new host, re-point the domains with domain:update, then delete the old one");
+        }
+
+        // Worked out BEFORE the frame exists, because Client.frame() stamps a clTRID and a command that turns out to
+        // ask for nothing should not spend one on the way out.
+        //
+        // Trimmed and blank-dropped here, not only in the builder: host:addrStringType is minLength 3 and
+        // host:statusValueType is a closed enumeration, so a blank in either list is a bare 2001 naming nothing -
+        // and it takes the good addresses in the same block with it. Filtering before the block is opened also
+        // keeps a list of nothing but blanks from emitting a childless <host:add/>, which is refused too.
+        String[] ops = {"add", "rem"};
+        List<List<String>> addrSets = Arrays.asList(
+                Commands.nonBlank(addAddresses), Commands.nonBlank(remAddresses));
+        List<List<String>> statusSets = Arrays.asList(
+                Commands.nonBlank(addStatuses), Commands.nonBlank(remStatuses));
+
+        // RFC 5732 section 3.2.5: "At least one <host:add>, <host:rem>, or <host:chg> element MUST be provided if the
+        // command is not being extended." host:updateType makes all three optional, so the schema cannot say this and
+        // an update that asks for nothing has always been valid XML - answered with 2003, or with 1000 and no change
+        // made. This library sends no extension with a host:update, and refuses the only chg the RFC defines (see
+        // newName above), so there is no case where the empty form is legitimate.
+        if (addrSets.get(0).isEmpty() && addrSets.get(1).isEmpty()
+                && statusSets.get(0).isEmpty() && statusSets.get(1).isEmpty()) {
+            throw new ValidationException("host:update asks for nothing: RFC 5732 requires at least one of "
+                    + "addAddresses, addStatuses, remAddresses or remStatuses, so this frame describes no change and "
+                    + "the registry has nothing to apply. Check whether the delta you assembled came out empty - a "
+                    + "list holding only blanks filters down to nothing.");
+        }
+
+        Frame frame = client.frame();
+        Element update = frame.ns(frame.verb("update"), H, "host:update");
+        frame.ns(update, H, "host:name", name);
+        for (int i = 0; i < 2; i++) {
+            List<String> addrs = addrSets.get(i);
+            List<String> statuses = statusSets.get(i);
+            if (addrs.isEmpty() && statuses.isEmpty()) {
+                continue;
+            }
+            Element block = frame.ns(update, H, "host:" + ops[i]);
+            for (String s : addrs) {
+                frame.ns(block, H, "host:addr", s, single("ip", ipVersion(s)));
+            }
+            for (String s : statuses) {
+                frame.ns(block, H, "host:status", null, single("s", s));
+            }
         }
         return client.request(frame);
     }

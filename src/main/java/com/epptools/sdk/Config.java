@@ -2,17 +2,18 @@ package com.epptools.sdk;
 
 import com.epptools.sdk.exception.ConfigException;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 /**
  * Immutable connection settings for an EPP session. EPP is strict RFC EPP over TLS, conventionally on port 700.
  *
- * <p>Many registries need NO client certificate; {@code clientCert}/{@code clientKey}/{@code clientKeyPassphrase}
+ * Many registries need NO client certificate; {@code clientCert}/{@code clientKey}/{@code clientKeyPassphrase}
  * are for the ones that require mutual TLS. When {@code objUris}/{@code extUris} are left null the client logs in
  * advertising exactly the services the server greeting offers, so it is never rejected for an unsupported service.
  *
- * <p>Built through {@link Builder}: {@code Config.builder("epp.example", "clid", "secret").port(700).build()}.
+ * Built through {@link Builder}: {@code Config.builder("epp.example", "clid", "secret").port(700).build()}.
  * The password and key passphrase are excluded from {@link #toString()} so a debug log never leaks them.
  */
 public final class Config {
@@ -77,8 +78,15 @@ public final class Config {
         this.clientCert = b.clientCert;
         this.clientKey = b.clientKey;
         this.clientKeyPassphrase = b.clientKeyPassphrase;
-        this.objUris = b.objUris == null ? null : Collections.unmodifiableList(b.objUris);
-        this.extUris = b.extUris == null ? null : Collections.unmodifiableList(b.extUris);
+        // COPIED, then wrapped. Collections.unmodifiableList is a view: it stops this object being changed through
+        // the field and does nothing about the caller still holding the list it passed in. A caller who builds a
+        // list, calls build(), then clears or reuses that list for the next tenant changes what this Config says -
+        // and the next login advertises the wrong services, or none at all. A Config is documented as immutable,
+        // and a promise that depends on the caller not touching their own list is not one.
+        this.objUris = b.objUris == null ? null
+                : Collections.unmodifiableList(new ArrayList<>(b.objUris));
+        this.extUris = b.extUris == null ? null
+                : Collections.unmodifiableList(new ArrayList<>(b.extUris));
         this.clTRIDPrefix = b.clTRIDPrefix;
         this.registryExtUri = b.registryExtUri;
         this.registryBalanceUri = b.registryBalanceUri;

@@ -55,9 +55,19 @@ public final class Contact {
             Commands.aliases("change", "chg", "removeStatuses", "remStatuses");
 
     public Response check(List<String> ids) {
+        // contact:checkType requires at least one <contact:id>, so an empty list builds a childless frame the
+        // registry refuses - and a caller reaches it by looping over a form field nobody filled in.
+        // A blank handle is refused, not dropped - see Commands.identifiers().
+        List<String> wanted = ids == null || ids.isEmpty()
+                ? java.util.Collections.<String>emptyList()
+                : Commands.identifiers(ids, "contact:check", "contact:id");
+        if (wanted.isEmpty()) {
+            throw new ValidationException("contact:check needs at least one handle - RFC 5733 requires a "
+                    + "<contact:id> child, so an empty list is a frame the registry refuses");
+        }
         Frame frame = client.frame();
         Element check = frame.ns(frame.verb("check"), C, "contact:check");
-        for (String cid : ids) {
+        for (String cid : wanted) {
             frame.ns(check, C, "contact:id", cid);
         }
         return client.request(frame);
@@ -108,19 +118,33 @@ public final class Contact {
 
         List<Object> postalInfos = asList(opt(options, "postalInfos"));
         if (postalInfos != null && !postalInfos.isEmpty()) {
+            // The two spellings are ALTERNATIVES. When postalInfos is given the eight flat keys are never read, so
+            // an address half in each form went out as whatever postalInfos held and the flat half was dropped in
+            // silence - accepted and discarded, which is the one outcome Options.check exists to make impossible.
+            List<String> stray = new java.util.ArrayList<>();
+            for (String key : Commands.POSTAL_KEYS) {
+                if (options.containsKey(key)) {
+                    stray.add("'" + key + "'");
+                }
+            }
+            if (!stray.isEmpty()) {
+                throw new ValidationException("contact:create takes the postal fields flat OR as 'postalInfos', "
+                        + "not both - " + String.join(", ", stray) + " beside 'postalInfos' would be accepted and "
+                        + "never read. Move them into a postalInfos block, or drop postalInfos.");
+            }
             for (Object pi : postalInfos) {
                 appendPostal(frame, c, (Map<String, Object>) pi, false);
             }
         } else {
+            // The flat form spreads the postal fields across the top level, beside email, voice and the rest, so
+            // only the postal keys are lifted out of it - handing the whole option map to a block that then checks
+            // its own keys would refuse every non-postal option in it.
             Map<String, Object> pi = new LinkedHashMap<>();
-            pi.put("name", opt(options, "name"));
-            pi.put("org", opt(options, "org"));
-            pi.put("street", opt(options, "street"));
-            pi.put("city", opt(options, "city"));
-            pi.put("sp", opt(options, "sp"));
-            pi.put("pc", opt(options, "pc"));
-            pi.put("cc", opt(options, "cc"));
-            pi.put("type", Commands.optString(options, "int", "type"));
+            for (String key : Commands.POSTAL_KEYS) {
+                if (options.containsKey(key)) {
+                    pi.put(key, options.get(key));
+                }
+            }
             appendPostal(frame, c, pi, false);
         }
         Object voice = opt(options, "voice");
@@ -157,36 +181,72 @@ public final class Contact {
         List<Object> remStatuses = asList(opt(options, "remStatuses"));
         Map<String, Object> chg = asMap(opt(options, "chg"));
 
+        // Worked out BEFORE the frame exists, because Client.frame() stamps a clTRID and a command that turns out to
+        // ask for nothing should not spend one on the way out.
+        //
+        // Trimmed and blank-dropped here, not only in the builder: contact:statusValueType is a closed enumeration,
+        // so an empty s="" is refused with a bare 2001 - and a list of nothing but blanks must not open a childless
+        // <contact:add/>, which is refused too.
+        List<String> addClean = Commands.nonBlank(addStatuses);
+        List<String> remClean = Commands.nonBlank(remStatuses);
+
+        List<Object> pis = null;
+        Object authInfo = null;
+        Map<String, Object> disclose = null;
+        if (chg != null && !chg.isEmpty()) {
+            Options.check(chg, Commands.CONTACT_CHG_KEYS, "contact:update 'chg'");
+            pis = asList(opt(chg, "postalInfos"));
+            Map<String, Object> singlePi = asMap(opt(chg, "postalInfo"));
+            if (pis == null && singlePi != null) {
+                pis = java.util.Collections.<Object>singletonList(singlePi);
+            }
+            authInfo = opt(chg, "authInfo");
+            disclose = asMap(chg.get("disclose"));
+        }
+        List<Object> postalInfos = pis == null ? java.util.Collections.<Object>emptyList() : pis;
+        boolean disclosing = disclose != null && !disclose.isEmpty();
+        // Whether a child will be emitted, rather than whether the caller passed the key. RFC 5733 says of the chg
+        // block: "At least one child element MUST be present" - and an empty disclose map or an empty postalInfos
+        // list is a key that produces none, so on its own it would open a <contact:chg/> the schema and the server
+        // both refuse.
+        boolean changing = !postalInfos.isEmpty() || (chg != null && chg.containsKey("voice"))
+                || (chg != null && chg.containsKey("fax")) || (chg != null && chg.containsKey("email"))
+                || authInfo != null || disclosing;
+
+        // RFC 5733 section 3.2.5: "At least one <contact:add>, <contact:rem>, or <contact:chg> element MUST be
+        // provided if the command is not being extended." contact:updateType makes all three optional, so the schema
+        // cannot say this and an update that asks for nothing has always been valid XML - answered with 2003, or with
+        // 1000 and no change made. This library sends no extension with a contact:update, so there is no case where
+        // the empty form is legitimate.
+        if (addClean.isEmpty() && remClean.isEmpty() && !changing) {
+            throw new ValidationException("contact:update asks for nothing: RFC 5733 requires at least one of "
+                    + "addStatuses, remStatuses or chg, so this frame describes no change and the registry has "
+                    + "nothing to apply. Check whether the delta you assembled came out empty - a list of statuses "
+                    + "holding only blanks filters down to nothing.");
+        }
+
         Frame frame = client.frame();
         Element update = frame.ns(frame.verb("update"), C, "contact:update");
         frame.ns(update, C, "contact:id", contactId);
         // contact:updateType allows a SINGLE add/rem block, each holding up to seven statuses; emit the wrapper
         // once and append every status into it.
-        if (addStatuses != null && !addStatuses.isEmpty()) {
+        if (!addClean.isEmpty()) {
             Element add = frame.ns(update, C, "contact:add");
-            for (Object s : addStatuses) {
-                frame.ns(add, C, "contact:status", null, single("s", String.valueOf(s)));
+            for (String s : addClean) {
+                frame.ns(add, C, "contact:status", null, single("s", s));
             }
         }
-        if (remStatuses != null && !remStatuses.isEmpty()) {
+        if (!remClean.isEmpty()) {
             Element rem = frame.ns(update, C, "contact:rem");
-            for (Object s : remStatuses) {
-                frame.ns(rem, C, "contact:status", null, single("s", String.valueOf(s)));
+            for (String s : remClean) {
+                frame.ns(rem, C, "contact:status", null, single("s", s));
             }
         }
-        if (chg != null && !chg.isEmpty()) {
-            Options.check(chg, Commands.CONTACT_CHG_KEYS, "contact:update 'chg'");
+        if (changing) {
             Element block = frame.ns(update, C, "contact:chg");
             // RFC 5733 chg order: postalInfo*, voice?, fax?, email?, authInfo?, disclose?
-            List<Object> pis = asList(opt(chg, "postalInfos"));
-            Map<String, Object> singlePi = asMap(opt(chg, "postalInfo"));
-            if (pis == null && singlePi != null) {
-                pis = java.util.Collections.<Object>singletonList(singlePi);
-            }
-            if (pis != null) {
-                for (Object pi : pis) {
-                    appendPostal(frame, block, (Map<String, Object>) pi, true);
-                }
+            for (Object pi : postalInfos) {
+                appendPostal(frame, block, (Map<String, Object>) pi, true);
             }
             if (chg.containsKey("voice")) {
                 frame.ns(block, C, "contact:voice", str(chg.get("voice")));
@@ -195,15 +255,20 @@ public final class Contact {
                 frame.ns(block, C, "contact:fax", str(chg.get("fax")));
             }
             if (chg.containsKey("email")) {
+                // Not a clearable field: RFC 5733 types it minTokenType (minLength 1), so an empty one is
+                // a schema-invalid frame answered with a bare 2001 that names nothing - the same refusal
+                // contact:create already makes.
+                if (str(chg.get("email")).isEmpty()) {
+                    throw new ValidationException("contact:update cannot clear 'email' - RFC 5733 "
+                            + "requires a non-empty one");
+                }
                 frame.ns(block, C, "contact:email", str(chg.get("email")));
             }
-            Object authInfo = opt(chg, "authInfo");
             if (authInfo != null) {
                 Element ai = frame.ns(block, C, "contact:authInfo");
                 frame.ns(ai, C, "contact:pw", String.valueOf(authInfo));
             }
-            Map<String, Object> disclose = asMap(chg.get("disclose"));
-            if (disclose != null && !disclose.isEmpty()) {
+            if (disclosing) {
                 appendDisclose(frame, block, disclose);
             }
         }
@@ -224,7 +289,8 @@ public final class Contact {
     public Response transfer(String op, String contactId, String authInfo) {
         Frame frame = client.frame();
         Element transfer = frame.verb("transfer");
-        transfer.setAttribute("op", op);
+        // The same closed set domain transfers take (RFC 5730 transferOpType), checked for the same reason.
+        transfer.setAttribute("op", Commands.enumArg(op, Commands.TRANSFER_OPS, "a transfer 'op'"));
         Element c = frame.ns(transfer, C, "contact:transfer");
         frame.ns(c, C, "contact:id", contactId);
         if (authInfo != null) {

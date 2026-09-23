@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -57,7 +58,7 @@ public final class Response {
             return new Response(xml, doc);
         } catch (org.xml.sax.SAXParseException e) {
             String m = e.getMessage() == null ? "" : e.getMessage();
-            if (m.toLowerCase().contains("doctype")) {
+            if (m.toLowerCase(Locale.ROOT).contains("doctype")) {
                 throw new ConnectionException("Server returned XML with a DOCTYPE - refused");
             }
             throw new ConnectionException("Server returned malformed XML: " + m);
@@ -333,18 +334,68 @@ public final class Response {
 
     // --- balance / prices / licence --------------------------------------------------------------------------
 
+    /**
+     * The balance:infData block of a balance answer, or null when this response is not one.
+     *
+     * Scoped, because &lt;fee:balance&gt; and &lt;fee:creditLimit&gt; are legal children of EVERY fee transform
+     * result: an ordinary create or renew that carried a fee agreement comes back with the registrar's balance
+     * echoed inside &lt;fee:creData&gt;. Read from anywhere in the frame, those echoes made balance() answer with a
+     * block on a create - and the manual says a null means "this response is not a balance answer", so a caller
+     * following it treated a create as one. The infData's own local name is the only thing that distinguishes the
+     * two, so it is what this looks for.
+     */
+    private Element balanceData() {
+        for (Element el : all("infData")) {
+            // Any of the four figures, read as DIRECT children. A registry names this extension what it likes -
+            // the URI is discovered from the greeting, never assumed - so the block is recognised by what it
+            // carries rather than by a namespace this library is not entitled to know.
+            for (String field : new String[]{"creditLimit", "balance", "availableCredit", "threshold"}) {
+                if (directChild(el, field) != null) {
+                    return el;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String directValue(Element parent, String localName) {
+        Element el = directChild(parent, localName);
+        return el != null ? directText(el) : null;
+    }
+
     /** Account figures from a balance:info response, or null when this is not a balance response. */
     public Map<String, String> balance() {
-        String limit = value("creditLimit");
-        String avail = value("availableCredit");
-        if (limit == null && avail == null) {
+        Element data = balanceData();
+        if (data == null) {
             return null;
         }
+        // EVERY FIELD IS OPTIONAL IN THE SCHEMA, and the low-balance poll notice is why: balance-1.0.xsd says
+        // such a notice may carry only <balance> and <threshold>, because a mandatory creditLimit would
+        // invalidate the one frame a registrar cannot re-request. So the test for "is this a balance answer at
+        // all" reads every field, not two of them. Reading creditLimit and availableCredit alone returned null
+        // for exactly the notice that matters most: the caller's null check never passed, the notice fell
+        // through to whatever handles the unrecognised, and an acked notice is gone - the registry keeps no copy.
+        String limit = directValue(data, "creditLimit");
+        String amount = directValue(data, "balance");
+        String avail = directValue(data, "availableCredit");
         Map<String, String> out = new LinkedHashMap<>();
         out.put("creditLimit", limit != null ? limit : "");
-        out.put("balance", value("balance") != null ? value("balance") : "");
+        out.put("balance", amount != null ? amount : "");
         out.put("availableCredit", avail != null ? avail : "");
         return out;
+    }
+
+    /**
+     * The threshold whose crossing queued a low-balance notice, or null on a plain balance answer.
+     *
+     * Its PRESENCE is the difference between a warning and a report - balance-1.0.xsd says so - and nothing in
+     * this library could read it, so a caller had no way to tell the two apart except by the notice text, which
+     * is written in the account's notification language. Read from the balance block, for the same reason
+     * {@link #balance()} is.
+     */
+    public String threshold() {
+        Element data = balanceData();
+        return data == null ? null : directValue(data, "threshold");
     }
 
     /** Renewal/restore price hints from a domain:info response (registry priceData), keyed by operation. */
@@ -397,7 +448,14 @@ public final class Response {
             }
             String name = directText(directChild(cd, "objID"));
             Map<String, Object> entry = new LinkedHashMap<>();
-            entry.put("avail", !"0".equals(cd.getAttribute("avail")));
+            // fee-1.0.xsd declares avail as xs:boolean, for which "false" is as legal as "0" and "true" as legal as
+            // "1". Testing for "0" alone read avail="false" as AVAILABLE, so a caller gating a create on the price
+            // answer went ahead with a create the registry refuses - and availability() in this same class had the
+            // rule right all along, which is why the two disagreed on the same frame. Absent still means available,
+            // because the schema gives the attribute default="true" and nothing here validates against it, so the
+            // default has to be applied by hand.
+            String availAttr = cd.getAttribute("avail");
+            entry.put("avail", availAttr.isEmpty() ? Boolean.TRUE : Boolean.valueOf(truthy(availAttr)));
             String reason = directText(directChild(cd, "reason"));
             entry.put("reason", reason.isEmpty() ? null : reason);
             Map<String, Object> commands = new LinkedHashMap<>();
@@ -583,12 +641,20 @@ public final class Response {
         return null;
     }
 
-    /** A domain's nameservers, from either hostObj or hostAttr, lower-cased and de-duplicated. */
+    /**
+     * A domain's nameservers, from either hostObj or hostAttr, lower-cased and de-duplicated.
+     *
+     * Locale.ROOT, and it matters on the wire. A DNS name is ASCII and this folding is a protocol operation, not a
+     * presentation one: under a Turkish or Azeri default, "NS1.INTERNIC.NET" comes back as "ns1.ınternıc.net" with
+     * a dotless i, and the obvious next step - read the delegation, hand a name straight back to domain().update()
+     * to remove it - then names a host the registry does not hold. The removal is answered 1000 and removes
+     * nothing, so the nameserver the caller meant to drop keeps answering for the zone.
+     */
     public List<String> nameservers() {
         List<String> out = new ArrayList<>();
         for (String ln : new String[]{"hostObj", "hostName"}) {
             for (Element el : all(ln)) {
-                String name = directText(el).toLowerCase();
+                String name = directText(el).toLowerCase(Locale.ROOT);
                 if (!name.isEmpty() && !out.contains(name)) {
                     out.add(name);
                 }
@@ -597,11 +663,16 @@ public final class Response {
         return out;
     }
 
-    /** A domain's INLINE glue (hostAttr), keyed by nameserver name. Empty for a registry that uses hostObj. */
+    /**
+     * A domain's INLINE glue (hostAttr), keyed by nameserver name. Empty for a registry that uses hostObj.
+     *
+     * Locale.ROOT for the same reason as {@link #nameservers()}: the key is a DNS name a caller looks a host up by,
+     * and a dotless i turns it into a key that never matches.
+     */
     public Map<String, List<Map<String, String>>> nameserverAddresses() {
         Map<String, List<Map<String, String>>> out = new LinkedHashMap<>();
         for (Element attr : all("hostAttr")) {
-            String name = directText(directChild(attr, "hostName")).toLowerCase();
+            String name = directText(directChild(attr, "hostName")).toLowerCase(Locale.ROOT);
             if (name.isEmpty()) {
                 continue;
             }
@@ -651,14 +722,19 @@ public final class Response {
         return out;
     }
 
-    /** Nameserver objects that live UNDER this domain (domain:host in a domain:info), lower-cased. */
+    /**
+     * Nameserver objects that live UNDER this domain (domain:host in a domain:info), lower-cased.
+     *
+     * Locale.ROOT for the same reason as {@link #nameservers()}: these names are what a caller feeds to
+     * host().delete() before deleting the domain, and one folded through a Turkish default names nothing.
+     */
     public List<String> subordinateHosts() {
         List<String> out = new ArrayList<>();
         for (Element el : all("host")) {
             if (!childElements(el).isEmpty()) {
                 continue;
             }
-            String name = directText(el).toLowerCase();
+            String name = directText(el).toLowerCase(Locale.ROOT);
             if (!name.isEmpty() && !out.contains(name)) {
                 out.add(name);
             }

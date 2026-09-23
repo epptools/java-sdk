@@ -48,10 +48,11 @@ import org.w3c.dom.NodeList;
  * no network. It is the Java port of the PHP suite in php-sdk/tests/offline_test.php, assertion for assertion and
  * in the same order, so the two outputs can be read side by side. Compile the whole tree and run:
  *
- * <pre>
- * javac --release 8 -d out $(find src -name "*.java")
- * java -cp out com.epptools.sdk.OfflineTest
- * </pre>
+ *     javac --release 8 -d out $(find src -name "*.java")
+ *     java -cp out com.epptools.sdk.OfflineTest
+ *
+ * Or tools/run-matrix.sh, which does that with the newest JDK on the box and then runs the result on every
+ * runtime it finds - the jar targets Java 8 and that is a claim about six of them.
  *
  * There is no test framework here on purpose: the library has no dependencies and neither does its suite.
  */
@@ -377,6 +378,7 @@ public final class OfflineTest {
         pollDrain();
         builderParity();
         argumentErrors();
+        transferPeriod();
         contactPostalClearing();
         transportRunawayFrame();
         extValuePayloads();
@@ -384,6 +386,24 @@ public final class OfflineTest {
         objectAccessors();
         checkResponseExtras();
         aliasSpellings();
+        nestedOptionKeys();
+        helloRefusesANonGreeting();
+        secdnsChoice();
+        blanksFromADirectCall();
+        maxSigLifeBound();
+        feeAgreementCurrency();
+        feeQueryNeedsAnOperation();
+        emptyServiceLists();
+        enumArguments();
+        checkNeedsAName();
+        checkRefusesABlankName();
+        updateMustAskForSomething();
+        discloseFormAsABareString();
+        availReadsFalse();
+        balanceIsScopedToABalanceAnswer();
+        defaultLocaleIndependence();
+        configCopiesItsLists();
+        reopeningClosesTheOldSocket();
         documentedVersions();
 
         System.out.println();
@@ -622,14 +642,30 @@ public final class OfflineTest {
     }
 
     private static void domainRestore() {
-        System.out.println("domain:update restore (rgp, no add/rem/chg)");
-        Session s = makeClient(Arrays.asList(GREETING, ok()));
+        System.out.println("domain:update restore (rgp, with the empty domain:chg RFC 3915 requires)");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok()));
         s.client.connect();
         s.client.domain().restore("redeem.com.ua");
         Xp ux = xp(s.fake.written.get(0));
         check("restore rgp op=request", ux.count("//e:extension/rgp:update/rgp:restore[@op=\"request\"]") == 1);
-        check("restore has no domain:chg", ux.count("//domain:chg") == 0);
+        // These two assertions used to say the opposite - that no domain:chg travels with a restore - and so pinned
+        // the defect in place. RFC 3915 section 4.2.5: "at least one empty <domain:add>, <domain:rem>, or
+        // <domain:chg> element MUST be present if this extension is specified within an <update> command", and the
+        // RFC's own restore example carries <domain:chg/>. Without it the frame is a <domain:update> holding
+        // nothing but a name, which a registry may read as a no-op and answer 2003 for - and a restore that does
+        // not happen is a domain that leaves redemption by being deleted.
+        check("restore carries the empty domain:chg RFC 3915 requires", ux.count("//domain:chg") == 1);
+        check("and it IS empty - a restore changes nothing else", ux.count("//domain:chg/*") == 0);
         check("restore has no domain:add", ux.count("//domain:add") == 0);
+
+        // A chg of the caller's own already satisfies the rule, and domain:updateType allows ONE chg, so a second
+        // empty one would be the schema refusal this fix exists to avoid.
+        Map<String, Object> both = map("restore", Boolean.TRUE, "chg", map("registrant", "REG-0007"));
+        s.client.domain().update("redeem.com.ua", both);
+        Xp bx = xp(s.fake.written.get(1));
+        check("a restore beside a real chg emits exactly one domain:chg", bx.count("//domain:chg") == 1);
+        check("and it is the caller's, not an empty one",
+                "REG-0007".equals(bx.firstText("//domain:chg/domain:registrant")));
     }
 
     private static void domainRenewDates() {
@@ -958,6 +994,23 @@ public final class OfflineTest {
         check("balance() availableCredit", b != null && "1234.56".equals(b.get("availableCredit")));
         check("messageLang() reads uk", "uk".equals(bal.messageLang()));
 
+        // THE LOW-BALANCE NOTICE IS THE ONE FRAME A REGISTRAR CANNOT RE-REQUEST, and balance-1.0.xsd makes
+        // every field optional so that such a notice may carry only <balance> and <threshold>. Reading only
+        // creditLimit and availableCredit made balance() return null for exactly that frame: the caller's
+        // branch never ran, the notice fell through to whatever handles the unrecognised, and once acked it
+        // is gone - the registry keeps no copy. The threshold is also the only thing that says WHY it fired.
+        String lowXml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                + "<result code=\"1301\"><msg>Command completed successfully; ack to dequeue</msg></result>"
+                + "<msgQ count=\"1\" id=\"7\"><qDate>2026-09-23T04:00:00Z</qDate><msg>Low balance</msg></msgQ>"
+                + "<resData><balance:infData xmlns:balance=\"http://sandbox.invalid/epp/balance-1.0\">"
+                + "<balance:balance>120.50</balance:balance><balance:threshold>500.00</balance:threshold>"
+                + "</balance:infData></resData><trID><svTRID>SRV-9</svTRID></trID></response></epp>";
+        Response low = Response.fromXml(lowXml);
+        check("a notice carrying only balance and threshold is still a balance answer", low.balance() != null);
+        check("and its figure is readable", "120.50".equals(low.currentBalance()));
+        check("and the threshold that fired it is readable", "500.00".equals(low.threshold()));
+        check("a plain balance answer has no threshold", bal.threshold() == null);
+
         String infoXml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
                 + "<result code=\"1000\"><msg lang=\"en\">Command completed successfully</msg></result>"
                 + "<resData><domain:infData xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">"
@@ -1157,6 +1210,14 @@ public final class OfflineTest {
         check("the userAgent names app, tech and os", sx.count("//ls:userAgent/ls:app") == 1
                 && sx.count("//ls:userAgent/ls:tech") == 1
                 && sx.count("//ls:userAgent/ls:os") == 1);
+        // And <os> carries the SHAPE RFC 8807 section 3.1 asks for: the system "with version if available",
+        // as arch SP name SP version. The four runtimes name the same machine differently - amd64 / AMD64 /
+        // x64 - so the exact string cannot be asserted here or compared across the libraries. What can be
+        // asserted is that it is not a single token: Node's process.platform says win32, a build target that
+        // names neither the architecture nor the version.
+        String osText = Client.osDescription();
+        check("and <os> carries more than one token, as RFC 8807 asks",
+                osText.trim().indexOf(' ') > 0 && !osText.contains("  "));
 
         System.out.println("login: loginSecurity=false stays off the extension entirely");
         Session off = makeClient(Arrays.asList(GREETING_LOGINSEC, ok()),
@@ -1625,6 +1686,62 @@ public final class OfflineTest {
         check("an unknown option key", argFails(() -> client.domain().create("x.ua", map("yeras", 1))));
     }
 
+    private static void transferPeriod() {
+        System.out.println("period: 0 years means one thing on a transfer and nothing anywhere else");
+        // A zone whose transfers are free states its policy as "the term does not move", and a registry whose
+        // validator wants that says so in its error: "transfer period for this zone must be 0". But RFC 5731's
+        // periodType is 1..99, so <domain:period>0</domain:period> is a frame the schema refuses - the value the
+        // operator asks for cannot be written down. Both are satisfied by leaving the element out, which is what
+        // an absent period already means: apply the zone's own policy.
+        Session z = makeClient(Arrays.asList(GREETING, ok()));
+        z.client.connect();
+        z.client.domain().transfer("request", "free.biz.ua", "auth-1", Integer.valueOf(0), null);
+        check("transfer with 0 years omits the period rather than writing an invalid one",
+                !z.fake.written.get(0).contains("domain:period"));
+        check("transfer with 0 years still carries the name and the secret",
+                z.fake.written.get(0).contains("<domain:name>free.biz.ua</domain:name>")
+                        && z.fake.written.get(0).contains("<domain:pw>auth-1</domain:pw>"));
+
+        Session one = makeClient(Arrays.asList(GREETING, ok()));
+        one.client.connect();
+        one.client.domain().transfer("request", "paid.com.ua", "auth-1", Integer.valueOf(1), null);
+        check("a zone that bundles a renewal still gets its period",
+                one.fake.written.get(0).contains("<domain:period unit=\"y\">1</domain:period>"));
+
+        // The bound is the schema's, so it is refused for every command that carries a period - and a create or
+        // a renew has no reading of 0 under which the caller meant something.
+        final Client v = makeClient(Arrays.asList(GREETING)).client;
+        check("100 years on a transfer",
+                argFails(() -> v.domain().transfer("request", "x.ua", "a", Integer.valueOf(100), null)));
+        check("0 years on a create", argFails(() -> v.domain().create("x.ua", map("years", 0))));
+        check("0 years on a renew", argFails(() -> v.domain().renew("x.ua", "2027-04-01", 0)));
+
+        // An e-mail is not among the clearable contact fields: RFC 5733 types it minTokenType (minLength 1).
+        // contact:create refused an empty one from the start; contact:update emitted it, and an empty
+        // <contact:email/> is a schema-invalid frame answered with a bare 2001 that names no element.
+        check("clearing a contact e-mail on update",
+                argFails(() -> v.contact().update("C-1", map("chg", map("email", "")))));
+        check("and through the builder, which is the same command",
+                argFails(() -> v.contact().updateBuilder("C-1").changeEmail("").send()));
+
+        // A blank status is not a status. statusValueType is an enumeration, so "" is not a member of it and
+        // <contact:status s=""/> is a schema-invalid frame - which is why every list step in every builder
+        // drops blanks.
+        Session st = makeClient(Arrays.asList(GREETING, ok()));
+        st.client.connect();
+        st.client.contact().updateBuilder("C-1").addStatus("", "  ", "clientUpdateProhibited").send();
+        // secDNS on a create carries records; on an update it carries a delta. Each command must refuse the
+        // OTHER's keys, because accepting them is worse than refusing them: a create that accepted "add"
+        // would read neither dsData nor keyData and register the domain UNSIGNED behind a 1000.
+        check("an update-only DNSSEC key on a create",
+                argFails(() -> v.domain().create("x.ua", map("secDNS", map("add", map("dsData", list()))))));
+        check("a create-only DNSSEC key on an update",
+                argFails(() -> v.domain().update("x.ua", map("secDNS", map("dsData", list())))));
+        check("a blank contact status contributes nothing",
+                st.fake.written.get(0).split("<contact:status", -1).length - 1 == 1
+                        && st.fake.written.get(0).contains("s=\"clientUpdateProhibited\""));
+    }
+
     private static void contactPostalClearing() {
         System.out.println("contact: which postal fields can be CLEARED is the schema's decision, not ours");
         // contact-1.0.xsd: optPostalLineType (org, street, sp) and pcType have no minLength, so those clear by
@@ -2060,6 +2177,814 @@ public final class OfflineTest {
         check("a near-miss spelling is still refused, not silently dropped", refused != null);
     }
 
+    // A MISSPELLED KEY INSIDE A NESTED MAP IS REFUSED, NOT DROPPED.
+    //
+    // Options.check was applied around each of these maps and never inside it, so the promise that an unrecognised
+    // key is refused stopped one level above the fields that decide what the registry stores. Every frame named
+    // below was built, was SCHEMA-VALID, and was answered 1000 - so nothing anywhere said the value had gone.
+    private static void nestedOptionKeys() {
+        System.out.println("nested option maps are key-checked too");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok(), ok(), ok(), ok(), ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+
+        // Without this: <contact:disclose flag="0"/> with no children. The registrant asked for their e-mail to be
+        // withheld, the registry answered 1000, and the address stayed published.
+        check("a misspelled disclose field is refused", argFails(() -> c.contact().create("REG-0001",
+                map("name", "Jane", "city", "Lviv", "cc", "UA", "email", "a@b.ua",
+                        "disclose", map("flag", Boolean.FALSE, "emial", Boolean.TRUE)))));
+
+        // Without this: <secDNS:keyTag>0</secDNS:keyTag> and an empty digest, which the schema ACCEPTS. The domain
+        // is published with a delegation signer matching no key, and once the parent zone carries it every
+        // validating resolver answers SERVFAIL for the name.
+        check("a misspelled dsData key is refused", argFails(() -> c.domain().create("ds.com.ua",
+                map("registrant", "REG-0001", "secDNS", map("dsData",
+                        list(map("key_tag", 12345, "alg", 8, "digestType", 2, "digest", "ABCD")))))));
+
+        check("a misspelled keyData key is refused", argFails(() -> c.domain().create("kd.com.ua",
+                map("registrant", "REG-0001", "secDNS", map("keyData",
+                        list(map("flags", 257, "protocol", 3, "alg", 8, "pubkey", "AwEAAaTz")))))));
+
+        // Without this: the currency is dropped and the cap is applied in whatever the registry prices in, so the
+        // one protection a registrar has against a premium price bit at another figure.
+        check("a misspelled fee-agreement key is refused", argFails(() -> c.domain().create("fee.com.ua",
+                map("registrant", "REG-0001", "fee", map("amount", "340.20", "curency", "UAH")))));
+
+        // Without this: a <domain:hostAttr> whose hostName is the string "null", or the glue silently discarded.
+        check("a misspelled glue key is refused", argFails(() -> c.domain().create("glue.com.ua",
+                map("registrant", "REG-0001", "nameservers",
+                        list(map("nmae", "ns1.x.ua", "addresses", list("192.0.2.1")))))));
+        check("glue with no name at all is refused", argFails(() -> c.domain().create("glue2.com.ua",
+                map("registrant", "REG-0001", "nameservers", list(map("addresses", list("192.0.2.1")))))));
+
+        // Without this: on an update the block REPLACES the stored one, so the registrant's postcode was deleted.
+        check("a misspelled postalInfo key is refused", argFails(() -> c.contact().update("REG-0001",
+                map("chg", map("postalInfo",
+                        map("name", "A", "city", "Kyiv", "cc", "UA", "postalCode", "01001"))))));
+
+        // The message names the nearest accepted spelling, as every other refused key does.
+        String said = null;
+        try {
+            c.contact().create("REG-0001", map("name", "A", "city", "Kyiv", "cc", "UA", "email", "a@b.ua",
+                    "disclose", map("flag", Boolean.FALSE, "emial", Boolean.TRUE)));
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("and names the nearest spelling", said != null && said.contains("did you mean 'email'"));
+        check("and says which block it was checking", said != null && said.contains("contact disclose"));
+
+        // The flat contact-create form spreads the postal fields across the top level beside email and voice, so
+        // only the postal keys may be lifted into the block check - or every non-postal option would be refused.
+        c.contact().create("REG-0002", map("name", "Jane", "city", "Lviv", "cc", "UA", "email", "a@b.ua",
+                "voice", "+380.441234567", "authInfo", "pw", "type", "int"));
+        Xp flat = xp(s.fake.written.get(0));
+        check("the flat form still builds one postalInfo", flat.count("//contact:postalInfo") == 1);
+        check("and the non-postal options beside it survive",
+                "+380.441234567".equals(flat.firstText("//contact:voice")));
+
+        // Given both spellings, the eight flat keys are never read. Accepted and dropped is the one outcome the key
+        // check exists to make impossible, so the combination is refused rather than half-honoured.
+        check("flat postal keys beside postalInfos are refused", argFails(() -> c.contact().create("REG-0003",
+                map("email", "a@b.ua", "city", "Lviv", "postalInfos",
+                        list(map("type", "int", "name", "A", "city", "Kyiv", "cc", "UA"))))));
+    }
+
+    // hello() IS THE KEEP-ALIVE, SO IT IS THE CALL THAT MUST NOT STORE A NON-GREETING.
+    //
+    // connect() was fixed to refuse one; this was the same defect unfixed, on the call a long-lived worker makes on
+    // a timer. After one bad hello the stored greeting was a <response>, which advertises no services, so the next
+    // login fell back to the DEFAULT service list - announcing services the server may not offer and losing the
+    // ones it does, the registry's own among them.
+    private static void helloRefusesANonGreeting() {
+        System.out.println("hello() refuses a frame that is not a greeting and keeps the one it has");
+        Session s = makeClient(Arrays.asList(GREETING, ok(2400), GREETING));
+        s.client.connect();
+        Response first = s.client.greeting();
+        check("the greeting read at connect advertises the registry extension",
+                EXT_REGISTRY.equals(s.client.registryExtUri()));
+
+        boolean threw = false;
+        String message = null;
+        try {
+            s.client.hello();
+        } catch (ConnectionException e) {
+            threw = true;
+            message = e.getMessage();
+        }
+        check("a <response> in reply to hello throws ConnectionException", threw);
+        check("and the message says what arrived instead", message != null && message.contains("not an EPP"));
+        check("and names the endpoint, as connect() does", message != null && message.contains("epp.example:700"));
+        // The stored greeting is the one that matters: had the response replaced it, registryExtUri() would answer
+        // null from here on and a licence create, a forced host delete and balance() would all begin throwing.
+        check("the previous greeting is still the stored one", s.client.greeting() == first);
+        check("so discovery still works after a bad hello", EXT_REGISTRY.equals(s.client.registryExtUri()));
+
+        Response fresh = s.client.hello();
+        check("a real greeting IS stored", fresh.isGreeting() && s.client.greeting() == fresh);
+
+        // Every other frame is logged; this one bypassed the request helper and so was logged nowhere.
+        final List<String> lines = new ArrayList<String>();
+        Session logged = makeClient(Arrays.asList(GREETING, GREETING));
+        logged.client.setLogger(new Client.Logger() {
+            public void debug(String m) {
+                lines.add(m);
+            }
+
+            public void info(String m) {
+            }
+
+            public void warning(String m) {
+            }
+        });
+        logged.client.connect();
+        int before = lines.size();
+        logged.client.hello();
+        boolean sawRequest = false;
+        boolean sawReply = false;
+        for (int i = before; i < lines.size(); i++) {
+            sawRequest = sawRequest || lines.get(i).contains("<hello/>");
+            sawReply = sawReply || lines.get(i).contains("<greeting>");
+        }
+        check("the hello frame reaches the debug log", sawRequest);
+        check("and so does the greeting it read back", sawReply);
+    }
+
+    // dsData AND keyData ARE ALTERNATIVES, NOT A PAIR.
+    //
+    // RFC 5910 sections 2 and 4, and secDNS-1.1.xsd, which makes dsOrKeyType and remType an XSD choice. Five paths
+    // emitted both lists from one helper and so built a frame the schema refuses outright - and a refused secDNS
+    // block takes the whole DNSSEC change with it.
+    private static void secdnsChoice() {
+        System.out.println("secDNS refuses dsData mixed with keyData, and keeps the legal nested form");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+        final String pubKey = "AwEAAaTz2fqJ4W1Zz9kQ0fH8yQ==";
+        final String digest = repeat("AB", 32);
+
+        check("the direct option map is refused", argFails(() -> c.domain().create("mix.com.ua",
+                map("registrant", "REG-0001", "secDNS", map(
+                        "dsData", list(map("keyTag", 1, "alg", 8, "digestType", 2, "digest", digest)),
+                        "keyData", list(map("flags", 257, "protocol", 3, "alg", 8, "pubKey", pubKey)))))));
+        check("createBuilder().dsRecord().keyRecord() is refused",
+                argFails(() -> c.domain().createBuilder("mixb.com.ua").registrant("REG-0001")
+                        .dsRecord(1, 8, 2, digest).keyRecord(257, 3, 8, pubKey).send()));
+        check("updateBuilder().addDsRecord().addKeyRecord() is refused",
+                argFails(() -> c.domain().updateBuilder("mixb.com.ua")
+                        .addDsRecord(1, 8, 2, digest).addKeyRecord(257, 3, 8, pubKey).send()));
+        check("and the same for rem", argFails(() -> c.domain().updateBuilder("mixb.com.ua")
+                .remDsRecord(1, 8, 2, digest).remKeyRecord(257, 3, 8, pubKey).send()));
+        check("dsRecordWithKey() plus a separate keyRecord() is refused too",
+                argFails(() -> c.domain().createBuilder("mixc.com.ua").registrant("REG-0001")
+                        .dsRecordWithKey(1, 8, 2, digest, 257, 3, 8, pubKey)
+                        .keyRecord(257, 3, 8, pubKey).send()));
+
+        String said = null;
+        try {
+            c.domain().create("mix2.com.ua", map("registrant", "REG-0001", "secDNS", map(
+                    "dsData", list(map("keyTag", 1, "alg", 8, "digestType", 2, "digest", digest)),
+                    "keyData", list(map("flags", 257, "protocol", 3, "alg", 8, "pubKey", pubKey)))));
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("the message cites the RFC", said != null && said.contains("RFC 5910"));
+        check("and points at the nesting that IS allowed", said != null && said.contains("dsRecordWithKey"));
+
+        // The nested form is the one legal way to send a DS record with the DNSKEY it came from, and it must keep
+        // working: registries that accept it can verify the digest for you.
+        c.domain().createBuilder("nested.com.ua").registrant("REG-0001")
+                .dsRecordWithKey(12345, 8, 2, digest, 257, 3, 8, pubKey).send();
+        Xp nx = xp(s.fake.written.get(0));
+        check("dsRecordWithKey() alone still builds one dsData", nx.count("//secDNS:create/secDNS:dsData") == 1);
+        check("with the key INSIDE it, which is the nesting RFC 5910 allows",
+                nx.count("//secDNS:dsData/secDNS:keyData/secDNS:pubKey") == 1);
+        check("and no keyData beside it", nx.count("//secDNS:create/secDNS:keyData") == 0);
+
+        // One list at a time is unremarkable and must stay so.
+        c.domain().create("keyed.com.ua", map("registrant", "REG-0001", "secDNS",
+                map("keyData", list(map("flags", 257, "protocol", 3, "alg", 8, "pubKey", pubKey)))));
+        check("keyData on its own is fine",
+                xp(s.fake.written.get(1)).count("//secDNS:create/secDNS:keyData") == 1);
+    }
+
+    // A DIRECT CALL TRIMS AND DROPS BLANKS, THE WAY EVERY BUILDER LIST STEP ALWAYS DID.
+    //
+    // Each frame below was verified schema-REFUSED before this: domain:status s="" and s="null", contact:status and
+    // host:status the same, an empty domain:hostObj (minLength 1) and an empty host:addr (minLength 3). The refusal
+    // is a bare 2001 that names no element, and it takes the good entries in the same block with it.
+    private static void blanksFromADirectCall() {
+        System.out.println("blanks and nulls do not reach the wire from a direct call");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok(), ok(), ok(), ok(), ok(), ok(), ok()));
+        s.client.connect();
+
+        s.client.domain().update("b.com.ua", map("add", map(
+                "statuses", list("", "  ", "clientHold", null),
+                "ns", list("", "ns1.example.net"),
+                "contacts", map("tech", list("", "TEC-0001")))));
+        Xp dx = xp(s.fake.written.get(0));
+        check("a blank domain status is dropped", dx.texts("//domain:status/@s").equals(Arrays.asList("clientHold")));
+        check("a blank hostObj is dropped", dx.texts("//domain:hostObj").equals(Arrays.asList("ns1.example.net")));
+        check("a blank contact handle is dropped", dx.texts("//domain:contact").equals(Arrays.asList("TEC-0001")));
+
+        // A list of NOTHING but blanks leaves the update with no delta at all, and RFC 5731 section 3.2.5 requires
+        // at least one of add/rem/chg unless the command is extended - so the whole command is refused rather than
+        // sent as a <domain:update> carrying only a name. Nothing is written, which is why every frame index below
+        // is one lower than the call order suggests.
+        int writtenBefore = s.fake.written.size();
+        boolean onlyBlanksThrew = false;
+        try {
+            s.client.domain().update("b.com.ua", map("add", map("statuses", list("", null))));
+        } catch (ValidationException e) {
+            onlyBlanksThrew = true;
+        }
+        check("a statuses list of only blanks leaves nothing to ask for", onlyBlanksThrew);
+        check("and no frame is sent for it", s.fake.written.size() == writtenBefore);
+
+        s.client.contact().update("REG-0001", map("addStatuses", list("", "clientUpdateProhibited"),
+                "remStatuses", list("", null)));
+        Xp cx = xp(s.fake.written.get(1));
+        check("a blank contact status is dropped",
+                cx.texts("//contact:add/contact:status/@s").equals(Arrays.asList("clientUpdateProhibited")));
+        check("and a rem block of only blanks is not opened", cx.count("//contact:rem") == 0);
+
+        s.client.host().create("ns9.example.net", Arrays.asList("", "192.0.2.1", "  "));
+        check("a blank host address is dropped on create",
+                xp(s.fake.written.get(2)).texts("//host:addr").equals(Arrays.asList("192.0.2.1")));
+
+        s.client.host().update("ns1.example.net", map("addAddresses", list("", "192.0.2.2"),
+                "addStatuses", list("", "clientUpdateProhibited"), "remAddresses", list("", null)));
+        Xp hx = xp(s.fake.written.get(3));
+        check("a blank host address is dropped on update",
+                hx.texts("//host:add/host:addr").equals(Arrays.asList("192.0.2.2")));
+        check("a blank host status is dropped",
+                hx.texts("//host:add/host:status/@s").equals(Arrays.asList("clientUpdateProhibited")));
+        check("and a rem block of only blanks is not opened", hx.count("//host:rem") == 0);
+
+        // Glue addresses, from the direct call and from the one builder step that had no filter of its own.
+        s.client.domain().create("g2.com.ua", map("registrant", "REG-0001", "nameservers",
+                list(map("name", "ns1.g2.com.ua", "addresses", list("", "192.0.2.1")))));
+        check("a blank glue address is dropped from a direct call",
+                xp(s.fake.written.get(4)).texts("//domain:hostAddr").equals(Arrays.asList("192.0.2.1")));
+        s.client.domain().createBuilder("g3.com.ua").registrant("REG-0001")
+                .nameserverWithGlue("ns1.g3.com.ua", "", "192.0.2.1", "  ").send();
+        check("and from nameserverWithGlue(), the one builder step that had no filter",
+                xp(s.fake.written.get(5)).texts("//domain:hostAddr").equals(Arrays.asList("192.0.2.1")));
+
+        // A nameserver list of nothing but blanks must not open a childless <domain:ns/>, which the schema refuses
+        // too: domain:nsType is a choice of at least one hostObj or at least one hostAttr.
+        s.client.domain().create("g4.com.ua", map("registrant", "REG-0001", "nameservers", list("", "  ")));
+        check("a nameserver list of only blanks emits no domain:ns",
+                xp(s.fake.written.get(6)).count("//domain:ns") == 0);
+    }
+
+    // maxSigLife IS BOUNDED, THE WAY THE PERIOD BESIDE IT IS.
+    //
+    // secDNS-1.1.xsd restricts maxSigLifeType to minInclusive 1, so a 0 is not a short lifetime: it is a frame the
+    // schema refuses, and a non-numeric value was coerced to 0 and became the same refusal wearing a typo.
+    // A BLANK NAME IN A check() IS REFUSED, NOT QUIETLY DROPPED.
+    //
+    // The opposite treatment to a blank status in a list of statuses, for the opposite reason. Dropping a blank NAME
+    // answers a different question than the one asked: fifty names in, forty-nine answers out, and the caller's own
+    // loop over their fifty finds nothing under the blank - which reads as "not available" rather than as "never
+    // asked". A wrong answer, further from its cause than the 2001 the frame would have earned.
+    private static void checkRefusesABlankName() {
+        System.out.println("check() with a blank name is refused, not filtered");
+        Session s = makeClient(Arrays.asList(GREETING, ok()));
+        s.client.connect();
+        final Client c = s.client;
+        check("domain:check with a blank name",
+                argFails(() -> c.domain().check(Arrays.asList("ok.com.ua", ""))));
+        check("contact:check with a blank handle",
+                argFails(() -> c.contact().check(Arrays.asList("ACME-0001", "  "))));
+        check("host:check with a blank name",
+                argFails(() -> c.host().check(Arrays.asList("ns1.ok.com.ua", ""))));
+        String said = null;
+        try {
+            c.domain().check(Arrays.asList("a.com.ua", "b.com.ua", ""));
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("the message names the position and the element",
+                said != null && said.contains("entry 3 of 3") && said.contains("domain:name"));
+        // Whitespace around a real name is trimmed rather than refused: a copy-paste artefact, not a missing
+        // question.
+        c.domain().check(Arrays.asList("  ok.com.ua  "));
+        check("a name with spaces around it is trimmed, not refused",
+                xp(s.fake.written.get(0)).texts("//domain:name").equals(Arrays.asList("ok.com.ua")));
+    }
+
+    // AN UPDATE THAT ASKS FOR NOTHING IS NOT SENT.
+    //
+    // RFC 5731, 5732 and 5733 each say in section 3.2.5: at least one of add, rem or chg MUST be provided if the
+    // command is not being extended. All three schemas make all three elements optional, so they cannot express it -
+    // which is why an update describing no change has always been valid XML. The server answers 2003, or worse 1000,
+    // and either way the change the caller believes they made was never described. Nobody writes update(name) on
+    // purpose; they assemble a delta from variables that all came out empty.
+    private static void updateMustAskForSomething() {
+        System.out.println("update() with no delta is refused rather than sent as a no-op");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+        check("domain:update with no delta", argFails(() -> c.domain().update("ok.com.ua", map())));
+        check("contact:update with no delta", argFails(() -> c.contact().update("ACME-0001", map())));
+        check("host:update with no delta", argFails(() -> c.host().update("ns1.ok.com.ua", map())));
+        // The same command once its list has been blank-filtered down to nothing.
+        check("a status list holding only blanks leaves nothing to do",
+                argFails(() -> c.domain().update("ok.com.ua", map("rem", map("statuses", list("", "  "))))));
+        check("and the same for a contact",
+                argFails(() -> c.contact().update("ACME-0001", map("remStatuses", list("")))));
+        check("and for a host",
+                argFails(() -> c.host().update("ns1.ok.com.ua", map("remStatuses", list("")))));
+        // A key that is present but produces no child is the same case: clearAuthInfo=false asks for nothing, and on
+        // its own it would have opened an empty <domain:chg/>.
+        check("a chg block whose only key produces no child",
+                argFails(() -> c.domain().update("ok.com.ua", map("chg", map("clearAuthInfo", Boolean.FALSE)))));
+        // RFC 5731 defines no null form for the registrant, so a domain can change hands but not be left without a
+        // holder. A blank one underruns clIDType's minLength 3.
+        check("a registrant cleared rather than changed",
+                argFails(() -> c.domain().update("ok.com.ua", map("chg", map("registrant", "")))));
+        String said = null;
+        try {
+            c.domain().update("ok.com.ua", map());
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("the message cites the rule", said != null && said.contains("RFC 5731"));
+
+        // The exception the RFC itself names: "All of these elements MAY be omitted if an <update> extension is
+        // present." A DNSSEC-only update carries no domain delta and must still go out.
+        c.domain().update("ok.com.ua", map("secDNS", map("remAll", Boolean.TRUE)));
+        Xp sec = xp(s.fake.written.get(0));
+        check("a DNSSEC-only update is still sent", sec.count("//secDNS:update") == 1);
+        check("and it carries no empty domain block",
+                sec.count("//domain:rem") == 0 && sec.count("//domain:chg") == 0);
+
+        // And a restore, which RFC 3915 requires to carry exactly the empty block the rule above forbids.
+        c.domain().restore("ok.com.ua");
+        Xp rst = xp(s.fake.written.get(1));
+        check("a restore still carries its deliberately empty chg block",
+                rst.count("//domain:chg") == 1 && rst.count("//rgp:restore") == 1);
+
+        // A real delta beside a filtered-out one: the empty block is omitted, the real one is not, and the command
+        // goes out.
+        c.domain().update("ok.com.ua", map("add", map("statuses", list("clientHold")),
+                "rem", map("statuses", list(""))));
+        Xp mix = xp(s.fake.written.get(2));
+        check("an emptied block is dropped while the real one survives",
+                mix.texts("//domain:add/domain:status/@s").equals(Arrays.asList("clientHold"))
+                        && mix.count("//domain:rem") == 0);
+    }
+
+    // ONE DISCLOSED FORM GIVEN AS A BARE STRING IS ONE FORM.
+    //
+    // The three siblings each accept disclose {addr: 'int'} - PHP casts it to a one-element array, Node wraps it, and
+    // this library takes the Arrays.asList branch. Pinned here because the Python sibling iterated the string's
+    // CHARACTERS and emitted type="i", type="n", type="t", so the same call was refused in one language out of four.
+    private static void discloseFormAsABareString() {
+        System.out.println("disclose: one form as a bare string is one form");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+        c.contact().update("ACME-0001", map("chg", map("disclose", map("flag", Boolean.FALSE, "addr", "int"))));
+        check("a bare string is one disclosed form",
+                xp(s.fake.written.get(0)).texts("//contact:disclose/contact:addr/@type")
+                        .equals(Arrays.asList("int")));
+        c.contact().update("ACME-0001",
+                map("chg", map("disclose", map("flag", Boolean.TRUE, "addr", list("int", "loc")))));
+        check("and a list of both forms still gives two",
+                xp(s.fake.written.get(1)).texts("//contact:disclose/contact:addr/@type")
+                        .equals(Arrays.asList("int", "loc")));
+        check("a form that is not int or loc is still refused",
+                argFails(() -> c.contact().update("ACME-0001",
+                        map("chg", map("disclose", map("flag", Boolean.TRUE, "addr", "postal"))))));
+    }
+
+    private static void maxSigLifeBound() {
+        System.out.println("secDNS maxSigLife is bounded (RFC 5910 minInclusive 1)");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+        final String digest = repeat("AB", 32);
+        final Map<String, Object> ds = map("dsData", list(
+                map("keyTag", 12345, "alg", 8, "digestType", 2, "digest", digest)));
+
+        for (final Object bad : new Object[]{Integer.valueOf(0), Integer.valueOf(-5), "soon", ""}) {
+            Map<String, Object> sec = new LinkedHashMap<String, Object>(ds);
+            sec.put("maxSigLife", bad);
+            final Map<String, Object> options = map("registrant", "REG-0001", "secDNS", sec);
+            check("create maxSigLife=" + bad + " is refused",
+                    argFails(() -> c.domain().create("msl.com.ua", options)));
+        }
+        check("update maxSigLife=0 is refused",
+                argFails(() -> c.domain().update("msl.com.ua", map("secDNS", map("maxSigLife", 0)))));
+        check("and the builder step is refused too", argFails(() -> c.domain().createBuilder("msl.com.ua")
+                .registrant("REG-0001").dsRecord(12345, 8, 2, digest).maxSigLife(0).send()));
+
+        String said = null;
+        try {
+            c.domain().update("msl.com.ua", map("secDNS", map("maxSigLife", 0)));
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("the message names the bound and the RFC",
+                said != null && said.contains("1 second or more") && said.contains("RFC 5910"));
+
+        // A real lifetime is untouched, and so is leaving it out.
+        Map<String, Object> sec = new LinkedHashMap<String, Object>(ds);
+        sec.put("maxSigLife", Integer.valueOf(604800));
+        c.domain().create("msl2.com.ua", map("registrant", "REG-0001", "secDNS", sec));
+        check("a real lifetime still goes out",
+                "604800".equals(xp(s.fake.written.get(0)).firstText("//secDNS:create/secDNS:maxSigLife")));
+        c.domain().create("msl3.com.ua", map("registrant", "REG-0001", "secDNS", ds));
+        check("and omitting it emits no element",
+                xp(s.fake.written.get(1)).count("//secDNS:maxSigLife") == 0);
+    }
+
+    // THE FEE AGREEMENT'S CURRENCY IS UPPER-CASED, AS check()'s HAS ALWAYS BEEN.
+    //
+    // fee:currencyType is pattern [A-Z]{3}, so 'uah' was refused with a bare 2001 at the one point money is
+    // involved - and it was refused by the schema, so nothing was charged and nothing said which element was wrong.
+    private static void feeAgreementCurrency() {
+        System.out.println("the fee agreement's currency is upper-cased");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok(), ok(), ok()));
+        s.client.connect();
+        s.client.domain().create("cur.com.ua", map("registrant", "REG-0001",
+                "fee", map("amount", "340.20", "currency", "uah")));
+        check("create: a lower-case agreement currency is upper-cased",
+                "UAH".equals(xp(s.fake.written.get(0)).firstText("//fee:create/fee:currency")));
+        s.client.domain().renew("cur.com.ua", "2027-01-01", 1, map("amount", "10.00", "currency", "uah"));
+        check("renew: the same", "UAH".equals(xp(s.fake.written.get(1)).firstText("//fee:renew/fee:currency")));
+        s.client.domain().createBuilder("cur2.com.ua").registrant("REG-0001").maxFee("340.20", "uah").send();
+        check("and through the builder", "UAH".equals(xp(s.fake.written.get(2)).firstText("//fee:create/fee:currency")));
+        // Locale.ROOT, not the default: a Turkish JVM folds 'ils' to 'İLS', which the pattern refuses just as
+        // surely as the lower-case form did.
+        s.client.domain().create("cur3.com.ua", map("registrant", "REG-0001",
+                "fee", map("amount", "1.00", "currency", "ils")));
+        check("and the folding is locale-independent",
+                "ILS".equals(xp(s.fake.written.get(3)).firstText("//fee:create/fee:currency")));
+    }
+
+    // A FEE QUERY NEEDS AN OPERATION. A CURRENCY ON ITS OWN PRICES NOTHING.
+    //
+    // fee:checkType requires at least one <fee:command>, so a currency with no operations built a <fee:check>
+    // carrying only the currency, which the schema refuses. Refused rather than quietly dropped: the caller asked a
+    // question, and silence would look like an answer.
+    private static void feeQueryNeedsAnOperation() {
+        System.out.println("a fee query with a currency and no operation is refused");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+        check("a currency with no operations is refused", argFails(
+                () -> c.domain().check(Arrays.asList("example.com.ua"), new LinkedHashMap<String, Object>(), "UAH")));
+        String said = null;
+        try {
+            c.domain().check(Arrays.asList("example.com.ua"), new LinkedHashMap<String, Object>(), "UAH");
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("and the message says a currency alone prices nothing",
+                said != null && said.contains("prices nothing"));
+
+        // A plain check with no rider at all is not a fee query and must stay untouched.
+        c.domain().check(Arrays.asList("example.com.ua"));
+        check("a plain check carries no fee:check", xp(s.fake.written.get(0)).count("//fee:check") == 0);
+        // And the ordinary case - operations, with or without a currency - is unchanged.
+        c.domain().check(Arrays.asList("example.com.ua"), map("create", 1), "UAH");
+        Xp fx = xp(s.fake.written.get(1));
+        check("operations plus a currency still build the rider", fx.count("//fee:check/fee:command") == 1);
+        check("with the currency in it", "UAH".equals(fx.firstText("//fee:check/fee:currency")));
+    }
+
+    // AN EMPTY objUris LIST MEANS "NOT CONFIGURED", NOT "ANNOUNCE NOTHING".
+    //
+    // epp-1.0.xsd gives loginSvcType an objURI with minOccurs 1, so honouring an empty list wrote no objURI at all
+    // and the login was refused outright - the least useful error in EPP, on the one command that has to succeed
+    // first. An empty extUris is legitimate, because svcExtension is itself optional, and keeps its meaning.
+    private static void emptyServiceLists() {
+        System.out.println("an empty objUris falls back to the greeting; an empty extUris still announces nothing");
+        Session obj = makeClient(Arrays.asList(GREETING, ok()),
+                config("secret").objUris(new ArrayList<String>()).build());
+        obj.client.connect();
+        obj.client.login();
+        Xp ox = xp(obj.fake.written.get(0));
+        check("an empty objUris advertises the greeting's objects",
+                ox.texts("//e:svcs/e:objURI").equals(
+                        Arrays.asList(Namespaces.CONTACT, Namespaces.DOMAIN, Namespaces.HOST)));
+
+        Session ext = makeClient(Arrays.asList(GREETING, ok()),
+                config("secret").extUris(new ArrayList<String>()).build());
+        ext.client.connect();
+        ext.client.login();
+        Xp ex = xp(ext.fake.written.get(0));
+        check("an empty extUris announces no extensions, which is legitimate",
+                ex.count("//e:svcExtension") == 0);
+        check("and the objects are still there", ex.count("//e:svcs/e:objURI") == 3);
+
+        // A list the caller DID configure still wins outright, which is what the override is for.
+        Session pinned = makeClient(Arrays.asList(GREETING, ok()),
+                config("secret").objUris(Arrays.asList(Namespaces.DOMAIN)).build());
+        pinned.client.connect();
+        pinned.client.login();
+        check("a configured objUris still overrides the greeting",
+                xp(pinned.fake.written.get(0)).texts("//e:svcs/e:objURI")
+                        .equals(Arrays.asList(Namespaces.DOMAIN)));
+    }
+
+    // ENUM-SHAPED ARGUMENTS ARE CHECKED AGAINST THE SET THE SCHEMA FIXES.
+    //
+    // Each of the five was verified schema-refused, and each is documented as a closed set - so the library knew
+    // the set while letting the value through. The refusals are bare 2001s and 2306s naming no attribute.
+    private static void enumArguments() {
+        System.out.println("enum-shaped arguments are refused against the schema's own set");
+        Session s = makeClient(Arrays.asList(GREETING, ok(), ok()));
+        s.client.connect();
+        final Client c = s.client;
+
+        check("a transfer op outside the five is refused",
+                argFails(() -> c.domain().transfer("renew", "example.com.ua", "pw")));
+        check("and on a contact transfer too",
+                argFails(() -> c.contact().transfer("accept", "REG-0001", "pw")));
+        check("an info hosts outside all/del/sub/none is refused",
+                argFails(() -> c.domain().info("example.com.ua", null, "everything")));
+        check("a contact role outside admin/billing/tech is refused",
+                argFails(() -> c.domain().create("role.com.ua",
+                        map("registrant", "REG-0001", "contacts", map("reseller", "RES-0001")))));
+        check("and on an update block too", argFails(() -> c.domain().update("role.com.ua",
+                map("add", map("contacts", map("reseller", "RES-0001"))))));
+        check("a postalInfo type outside int/loc is refused",
+                argFails(() -> c.contact().create("REG-0004", map("email", "a@b.ua", "type", "ascii",
+                        "name", "A", "city", "Kyiv", "cc", "UA"))));
+        check("a disclosed field's form outside int/loc is refused",
+                argFails(() -> c.contact().create("REG-0005", map("email", "a@b.ua",
+                        "name", "A", "city", "Kyiv", "cc", "UA",
+                        "disclose", map("flag", Boolean.TRUE, "addr", list("ascii"))))));
+
+        String said = null;
+        try {
+            c.domain().transfer("renew", "example.com.ua", "pw");
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("the message names the accepted set",
+                said != null && said.contains("request, approve, reject, cancel, query"));
+        check("and the value that was not in it", said != null && said.contains("'renew'"));
+
+        // The legal values are unchanged, including the default hosts scope.
+        c.domain().transfer("query", "example.com.ua");
+        check("a legal transfer op is unchanged",
+                "query".equals(xp(s.fake.written.get(0)).firstText("//e:transfer/@op")));
+        c.domain().info("example.com.ua");
+        check("and the default hosts scope is still all",
+                "all".equals(xp(s.fake.written.get(1)).firstText("//domain:name/@hosts")));
+    }
+
+    // check() WITH NO NAMES IS REFUSED, BECAUSE THE FRAME IT WOULD BUILD IS.
+    //
+    // domain:check, contact:check and host:check each require at least one child, so an empty list built a
+    // childless frame - and a caller reaches it by looping over a query string or a basket that turned out empty.
+    private static void checkNeedsAName() {
+        System.out.println("check() with an empty list is refused");
+        Session s = makeClient(Arrays.asList(GREETING));
+        s.client.connect();
+        final Client c = s.client;
+        check("domain:check with no names is refused",
+                argFails(() -> c.domain().check(new ArrayList<String>())));
+        check("contact:check with no handles is refused",
+                argFails(() -> c.contact().check(new ArrayList<String>())));
+        check("host:check with no names is refused",
+                argFails(() -> c.host().check(new ArrayList<String>())));
+        // A list of nothing but blanks is the same thing arriving from a form rather than from a literal.
+        check("and a list of nothing but blanks is refused too",
+                argFails(() -> c.domain().check(Arrays.asList("", "  "))));
+        String said = null;
+        try {
+            c.domain().check(new ArrayList<String>());
+        } catch (ValidationException e) {
+            said = e.getMessage();
+        }
+        check("the message cites the rule", said != null && said.contains("RFC 5731"));
+    }
+
+    // fees() READS avail="false" AS UNAVAILABLE.
+    //
+    // fee-1.0.xsd declares avail as xs:boolean, for which "false" is as legal as "0". Testing for "0" alone read
+    // avail="false" as AVAILABLE, so a caller gating a create on the price answer went ahead with a create the
+    // registry refuses - while availability() in the same class had the rule right, so the two disagreed on one frame.
+    private static void availReadsFalse() {
+        System.out.println("fees() reads avail=\"false\" as unavailable, as availability() always did");
+        String xml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                + "<result code=\"1000\"><msg>ok</msg></result><extension>"
+                + "<fee:chkData xmlns:fee=\"urn:ietf:params:xml:ns:epp:fee-1.0\">"
+                + "<fee:currency>UAH</fee:currency>"
+                + "<fee:cd avail=\"false\"><fee:objID>gone.com.ua</fee:objID>"
+                + "<fee:reason>Zone is not served</fee:reason></fee:cd>"
+                + "<fee:cd avail=\"0\"><fee:objID>zero.com.ua</fee:objID></fee:cd>"
+                + "<fee:cd avail=\"true\"><fee:objID>yes.com.ua</fee:objID></fee:cd>"
+                + "<fee:cd avail=\"1\"><fee:objID>one.com.ua</fee:objID></fee:cd>"
+                + "<fee:cd><fee:objID>absent.com.ua</fee:objID></fee:cd>"
+                + "</fee:chkData></extension><trID><svTRID>SRV-1</svTRID></trID></response></epp>";
+        Map<String, Object> fees = Response.fromXml(xml).fees();
+        check("avail=\"false\" is unavailable", Boolean.FALSE.equals(dig(fees, "gone.com.ua", "avail")));
+        check("avail=\"0\" is unavailable too", Boolean.FALSE.equals(dig(fees, "zero.com.ua", "avail")));
+        check("avail=\"true\" is available", Boolean.TRUE.equals(dig(fees, "yes.com.ua", "avail")));
+        check("avail=\"1\" is available", Boolean.TRUE.equals(dig(fees, "one.com.ua", "avail")));
+        // The attribute is declared default="true" and nothing here validates against the schema, so the default
+        // has to be applied by hand - absent must not read as unavailable.
+        check("an absent avail keeps the schema's default of available",
+                Boolean.TRUE.equals(dig(fees, "absent.com.ua", "avail")));
+        check("and the reason is still there to show the caller",
+                "Zone is not served".equals(dig(fees, "gone.com.ua", "reason")));
+    }
+
+    // balance() ANSWERS ONLY ON A BALANCE ANSWER.
+    //
+    // <fee:balance> and <fee:creditLimit> are legal children of EVERY fee transform result, so an ordinary create
+    // carrying a fee echo answered balance() with a block. The manual says a null means "this response is not a
+    // balance answer", and availableCredit() is documented as the one to compare a price against - so a caller
+    // following the manual treated a create as a balance report.
+    private static void balanceIsScopedToABalanceAnswer() {
+        System.out.println("balance() reads only a balance infData, not a fee echo on a create");
+        String feeCre = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                + "<result code=\"1000\"><msg>ok</msg></result>"
+                + "<resData><domain:creData xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">"
+                + "<domain:name>prem.com.ua</domain:name></domain:creData></resData>"
+                + "<extension><fee:creData xmlns:fee=\"urn:ietf:params:xml:ns:epp:fee-1.0\">"
+                + "<fee:currency>UAH</fee:currency><fee:fee>340.20</fee:fee>"
+                + "<fee:balance>1200.00</fee:balance><fee:creditLimit>5000.00</fee:creditLimit>"
+                + "</fee:creData></extension><trID><svTRID>SRV-1</svTRID></trID></response></epp>";
+        Response cre = Response.fromXml(feeCre);
+        check("a create carrying a fee echo is not a balance answer", cre.balance() == null);
+        check("so availableCredit() says null rather than an empty string", cre.availableCredit() == null);
+        check("and threshold() says null too", cre.threshold() == null);
+        // The figures are still readable where they belong - as the fee actually charged.
+        check("the charged fee is still readable", "340.20".equals(cre.feeAmount()));
+
+        String balXml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                + "<result code=\"1000\"><msg>ok</msg></result><resData>"
+                + "<balance:infData xmlns:balance=\"" + EXT_BALANCE + "\">"
+                + "<balance:creditLimit>5000.00</balance:creditLimit>"
+                + "<balance:balance>1200.00</balance:balance>"
+                + "<balance:availableCredit>6200.00</balance:availableCredit>"
+                + "</balance:infData></resData><trID><svTRID>SRV-1</svTRID></trID></response></epp>";
+        Response bal = Response.fromXml(balXml);
+        check("a real balance answer still reads", bal.balance() != null);
+        check("with its availableCredit", "6200.00".equals(bal.availableCredit()));
+        check("and no threshold, because it is a report and not a warning", bal.threshold() == null);
+
+        // The low-balance poll notice carries only balance and threshold, and is the frame that matters most: an
+        // acked notice is gone, because the registry keeps no copy.
+        String lowXml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                + "<result code=\"1301\"><msg>Command completed successfully; ack to dequeue</msg></result>"
+                + "<msgQ count=\"1\" id=\"7\"><msg>Balance below threshold</msg></msgQ><resData>"
+                + "<balance:infData xmlns:balance=\"" + EXT_BALANCE + "\">"
+                + "<balance:balance>90.00</balance:balance>"
+                + "<balance:threshold>100.00</balance:threshold>"
+                + "</balance:infData></resData><trID><svTRID>SRV-1</svTRID></trID></response></epp>";
+        Response low = Response.fromXml(lowXml);
+        check("a threshold-only notice is still a balance answer", low.balance() != null);
+        check("its balance reads", "90.00".equals(low.currentBalance()));
+        check("and the threshold is what tells a warning from a report", "100.00".equals(low.threshold()));
+
+        // A frame with no balance block anywhere - the ordinary case - still says null.
+        check("an ordinary info is not a balance answer", Response.fromXml(ok()).balance() == null);
+    }
+
+    // THE LIBRARY BEHAVES THE SAME WHATEVER LOCALE THE JVM WAS STARTED IN.
+    //
+    // Java's no-argument toLowerCase/toUpperCase, SimpleDateFormat and String.format all read the DEFAULT locale,
+    // and three of the uses here were wire-visible. The suite forces the two locales that break them rather than
+    // trusting the developer's own: tools/run-matrix.sh runs on six runtimes, all of them in one locale.
+    private static void defaultLocaleIndependence() {
+        System.out.println("no wire value depends on the JVM's default locale");
+        java.util.Locale original = java.util.Locale.getDefault();
+        try {
+            // Turkish: the dotless i. "NS1.INTERNIC.NET".toLowerCase() becomes "ns1.ınternıc.net", and a name read
+            // back and handed to an update then removes nothing - the nameserver keeps answering for the zone.
+            java.util.Locale.setDefault(new java.util.Locale("tr", "TR"));
+            String infoXml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                    + "<result code=\"1000\"><msg>ok</msg></result><resData>"
+                    + "<domain:infData xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">"
+                    + "<domain:name>example.com.ua</domain:name>"
+                    + "<domain:ns><domain:hostObj>NS1.INTERNIC.NET</domain:hostObj></domain:ns>"
+                    + "<domain:host>SUB.EXAMPLE.COM.UA</domain:host>"
+                    + "</domain:infData></resData><trID><svTRID>SRV-1</svTRID></trID></response></epp>";
+            Response info = Response.fromXml(infoXml);
+            check("nameservers() folds ASCII, not the Turkish alphabet",
+                    info.nameservers().equals(Arrays.asList("ns1.internic.net")));
+            check("subordinateHosts() too",
+                    info.subordinateHosts().equals(Arrays.asList("sub.example.com.ua")));
+            String glueXml = "<?xml version=\"1.0\"?><epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><response>"
+                    + "<result code=\"1000\"><msg>ok</msg></result><resData>"
+                    + "<domain:infData xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">"
+                    + "<domain:ns><domain:hostAttr><domain:hostName>NS1.INTERNIC.NET</domain:hostName>"
+                    + "<domain:hostAddr ip=\"v4\">192.0.2.1</domain:hostAddr>"
+                    + "</domain:hostAttr></domain:ns></domain:infData></resData>"
+                    + "<trID><svTRID>SRV-1</svTRID></trID></response></epp>";
+            check("and nameserverAddresses() keys the glue by a name that matches",
+                    Response.fromXml(glueXml).nameserverAddresses().containsKey("ns1.internic.net"));
+
+            Session tr = makeClient(Arrays.asList(GREETING, ok(), ok()));
+            tr.client.connect();
+            // 'ils' upper-cases to 'İLS' under a Turkish default, which [A-Z]{3} refuses.
+            tr.client.domain().check(Arrays.asList("example.com.ua"), map("create", 1), "ils");
+            check("a check currency folds to ASCII",
+                    "ILS".equals(xp(tr.fake.written.get(0)).firstText("//fee:check/fee:currency")));
+            // A misspelling must still find its suggestion: normalise() folds authInfo, and a dotless i there means
+            // auth_info stops matching and the reader is told their key is unknown with no suggestion at all.
+            String said = null;
+            try {
+                tr.client.domain().create("x.com.ua", map("registrant", "REG-0001", "auth_info", "pw"));
+            } catch (ValidationException e) {
+                said = e.getMessage();
+            }
+            check("and a misspelled key still finds authInfo", said != null && said.contains("authInfo"));
+
+            // Thai: a Buddhist-era calendar and Thai digits. This is the worst of them, because the result PASSES
+            // the schema and reaches the registry - a clTRID carrying the year 2569 and Thai numerals is accepted
+            // and then matches nothing, and correlating a disputed charge against the registry's record is the
+            // whole reason the field exists.
+            java.util.Locale.setDefault(new java.util.Locale("th", "TH"));
+            Session th = makeClient(Arrays.asList(GREETING, ok()));
+            th.client.connect();
+            th.client.domain().check(Arrays.asList("example.com.ua"));
+            String trid = xp(th.fake.written.get(0)).firstText("//e:clTRID");
+            check("a clTRID is ASCII throughout", trid != null && trid.matches("^[\\x20-\\x7E]+$"));
+            check("and carries a Gregorian year, not a Buddhist one", trid != null && trid.contains("-20"));
+            check("and its counter is in ASCII digits", trid != null && trid.matches(".*-\\d{4}$"));
+        } finally {
+            java.util.Locale.setDefault(original);
+        }
+    }
+
+    // A Config DOES NOT CHANGE UNDER ITS OWNER.
+    //
+    // Collections.unmodifiableList is a VIEW: it stops the Config being changed through the field and does nothing
+    // about the caller still holding the list they passed in. A caller who builds a list, calls build(), then clears
+    // or reuses it for the next tenant changed what this Config said - and the next login advertised the wrong
+    // services, or, once an empty objUris meant "not configured", quietly a different set.
+    private static void configCopiesItsLists() {
+        System.out.println("Config copies the service-URI lists it is given");
+        List<String> objs = new ArrayList<String>(Arrays.asList(Namespaces.DOMAIN, Namespaces.CONTACT));
+        List<String> exts = new ArrayList<String>(Arrays.asList(Namespaces.SECDNS));
+        Config cfg = config("secret").objUris(objs).extUris(exts).build();
+        objs.clear();
+        exts.add("http://example.invalid/injected-1.0");
+        check("clearing the caller's objUris list leaves the Config alone",
+                cfg.objUris.equals(Arrays.asList(Namespaces.DOMAIN, Namespaces.CONTACT)));
+        check("and adding to their extUris list does not reach it",
+                cfg.extUris.equals(Arrays.asList(Namespaces.SECDNS)));
+
+        // And the login built from it advertises what was configured, not what the caller's list became.
+        Session s = makeClient(Arrays.asList(GREETING, ok()), cfg);
+        s.client.connect();
+        s.client.login();
+        Xp lx = xp(s.fake.written.get(0));
+        check("the login advertises the configured objects",
+                lx.texts("//e:svcs/e:objURI").equals(Arrays.asList(Namespaces.DOMAIN, Namespaces.CONTACT)));
+        check("and not the injected extension",
+                lx.count("//e:extURI[text()=\"http://example.invalid/injected-1.0\"]") == 0);
+
+        // The field is still unmodifiable, so neither half of the promise is traded for the other.
+        boolean frozen = false;
+        try {
+            cfg.objUris.add("http://example.invalid/late-1.0");
+        } catch (UnsupportedOperationException e) {
+            frozen = true;
+        }
+        check("and the Config's own list still refuses to be modified", frozen);
+    }
+
+    // open() CLOSES WHAT IT IS REPLACING.
+    //
+    // It is documented as the way to start a fresh connection after a failure, and on a healthy connection it
+    // replaced the socket without closing it: the old one was left to the garbage collector, and with it the
+    // registry-side session, which counts against the per-registrar session limit until the server times it out. A
+    // few of those and the next login is refused 2502 for connections nobody is using.
+    private static void reopeningClosesTheOldSocket() {
+        System.out.println("Connection.open() closes the socket it replaces");
+        Connection conn = new Connection(config("secret").connectTimeout(0.05).build());
+        SSLSocket stale;
+        try {
+            // An unconnected SSLSocket stands in for a live one, as it does in transportRunawayFrame().
+            stale = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
+            Field sockField = Connection.class.getDeclaredField("sock");
+            sockField.setAccessible(true);
+            sockField.set(conn, stale);
+        } catch (Exception e) {
+            throw new RuntimeException("cannot stand a fake socket into Connection", e);
+        }
+        check("the connection starts out open", conn.isOpen());
+        check("and its stand-in socket starts out unclosed", !stale.isClosed());
+        try {
+            // The host does not resolve, so open() fails after doing its cleanup - which is the half being tested.
+            conn.open();
+        } catch (ConnectionException expected) {
+            // Reaching the network is not the point; what happened to the old socket first is.
+        }
+        check("the socket that was there is CLOSED, not left to the collector", stale.isClosed());
+        check("and the connection no longer reports itself open", !conn.isOpen());
+    }
+
     // EVERY VERSION THIS PACKAGE STATES ABOUT ITSELF AGREES WITH ITS OWN VERSION.
     //
     // The install instructions name a version, in the Maven snippet, the Gradle line and the release tag - and
@@ -2080,7 +3005,9 @@ public final class OfflineTest {
 
         List<String> stale = new ArrayList<String>();
         int stated = 0;
-        Pattern looksLikeOurs = Pattern.compile("(?<![\\d.])1\\.\\d+\\.\\d+(?![\\d.])");
+        // A following digit disqualifies a match so 1.1.10 is not read as 1.1.1; a following dot does not,
+        // because epptools-sdk-1.1.1.jar in an install line is exactly the stale version this looks for.
+        Pattern looksLikeOurs = Pattern.compile("(?<![\\d.])1\\.\\d+\\.\\d+(?!\\d)");
         for (File doc : docs) {
             if (!doc.isFile()) {
                 continue;
@@ -2100,6 +3027,51 @@ public final class OfflineTest {
         check("every documented version is " + Version.VERSION
                 + (stale.isEmpty() ? "" : " - stale: " + stale.subList(0, Math.min(4, stale.size()))),
                 stale.isEmpty());
+
+        // THE CHANGELOG IS SCANNED FOR INSTALL COORDINATES ONLY, and it is scanned because it drifted: its
+        // build section named epptools-sdk:1.1.1 while everything else said 1.1.2, and 298 assertions passed
+        // over it because the scan above skips the file by name.
+        //
+        // Skipping it wholesale was not wrong, it was too broad. A changelog's job is to name OLD versions -
+        // this one discusses 1.0.1, 1.0.2, 1.1.0 and 1.1.1 as history in four separate sentences, and the
+        // Keep a Changelog link carries a 1.1.0 of its own - so the loose pattern above would report five
+        // false positives and be turned off again within a release. What CANNOT go stale is an install
+        // coordinate: a groupId:artifactId:version, a <version> element, a jar filename or a vN.N.N tag. Those
+        // are instructions a reader copies, and every one of them must name this release.
+        //
+        // Each form is anchored to the text around it, not matched loose. The release-tag form especially: a bare
+        // vN.N.N also matches the Semantic Versioning link in this changelog's own header, semver.org/spec/v2.0.0,
+        // and a check that reports a cited specification as a stale coordinate is a check that gets switched off.
+        Pattern coordinate = Pattern.compile(
+                "epptools-sdk[:-](\\d+\\.\\d+\\.\\d+)"
+                + "|<version>(\\d+\\.\\d+\\.\\d+)</version>"
+                + "|--branch v(\\d+\\.\\d+\\.\\d+)"
+                + "|<tag>v(\\d+\\.\\d+\\.\\d+)</tag>");
+        List<File> withChangelog = new ArrayList<File>(docs);
+        withChangelog.add(new File(root, "CHANGELOG.md"));
+        List<String> staleCoordinates = new ArrayList<String>();
+        int coordinates = 0;
+        for (File doc : withChangelog) {
+            if (!doc.isFile()) {
+                continue;
+            }
+            Matcher m = coordinate.matcher(readFile(doc));
+            while (m.find()) {
+                String found = null;
+                for (int g = 1; g <= m.groupCount() && found == null; g++) {
+                    found = m.group(g);
+                }
+                coordinates++;
+                if (!found.equals(Version.VERSION)) {
+                    staleCoordinates.add(doc.getName() + ": " + m.group());
+                }
+            }
+        }
+        check("install coordinates are stated somewhere, CHANGELOG.md included", coordinates > 0);
+        check("and every one of them names " + Version.VERSION
+                + (staleCoordinates.isEmpty() ? ""
+                        : " - stale: " + staleCoordinates.subList(0, Math.min(4, staleCoordinates.size()))),
+                staleCoordinates.isEmpty());
     }
 
     private static void collectMarkdown(File dir, List<File> into) {
