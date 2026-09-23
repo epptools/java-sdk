@@ -27,27 +27,27 @@ Maven:
 <dependency>
   <groupId>io.github.epptools</groupId>
   <artifactId>epptools-sdk</artifactId>
-  <version>1.1.1</version>
+  <version>1.1.2</version>
 </dependency>
 ```
 
 Gradle:
 
 ```groovy
-implementation 'io.github.epptools:epptools-sdk:1.1.1'
+implementation 'io.github.epptools:epptools-sdk:1.1.2'
 ```
 
 Kotlin DSL:
 
 ```kotlin
-implementation("io.github.epptools:epptools-sdk:1.1.1")
+implementation("io.github.epptools:epptools-sdk:1.1.2")
 ```
 
 No build tool at all? Clone the repo, pinned to a release tag, and compile the sources straight into
 your own tree — there is nothing to resolve:
 
 ```bash
-git clone --branch v1.1.1 https://github.com/epptools/java-sdk
+git clone --branch v1.1.2 https://github.com/epptools/java-sdk
 javac --release 8 -d out $(find java-sdk/src/main/java -name '*.java')
 ```
 
@@ -177,12 +177,12 @@ client.domain().info("example1.com.ua");
 client.domain().info("example1.com.ua", "pw", "all");   // hosts: all (default) | del | sub | none
 
 Map<String, Object> contacts = new LinkedHashMap<>();
-contacts.put("admin", "C1");
-contacts.put("tech", Arrays.asList("C2", "C3"));        // one handle in a role, or several
+contacts.put("admin", "ADM-0001");
+contacts.put("tech", Arrays.asList("TEC-0001", "TEC-0002"));        // one handle in a role, or several
 
 Map<String, Object> create = new LinkedHashMap<>();
 create.put("years", 1);
-create.put("registrant", "C1");
+create.put("registrant", "REG-0001");
 create.put("contacts", contacts);
 create.put("nameservers", Arrays.asList("ns1.example.net", "ns2.example.net"));
 // Or with the glue inlined, where the registry wants the addresses with the name rather than a
@@ -197,7 +197,12 @@ create.put("license", "TM-123");                        // where your registry r
 Map<String, Object> ds = new LinkedHashMap<>();
 ds.put("keyTag", 12345); ds.put("alg", 8); ds.put("digestType", 2); ds.put("digest", "ABCD...");
 Map<String, Object> secDns = new LinkedHashMap<>();
-secDns.put("dsData", Arrays.asList(ds));                // or keyData, or maxSigLife
+secDns.put("dsData", Arrays.asList(ds));                // dsData OR keyData — RFC 5910 makes them
+                                                        // a choice and a block carrying both is
+                                                        // refused. To send a DS record with the
+                                                        // DNSKEY it came from, nest the key inside
+                                                        // the record: ds.put("keyData", key)
+secDns.put("maxSigLife", 604800);                       // seconds, 1 or more (RFC 5910)
 create.put("secDNS", secDns);
 client.domain().create("example1.com.ua", create);
 
@@ -205,7 +210,7 @@ Map<String, Object> add = new LinkedHashMap<>();
 add.put("ns", Arrays.asList("ns3.example.net"));
 add.put("statuses", Arrays.asList("clientHold"));
 Map<String, Object> change = new LinkedHashMap<>();
-change.put("registrant", "C9");
+change.put("registrant", "REG-0009");
 change.put("authInfo", "newpw");                        // or clearAuthInfo=true to REMOVE it
 Map<String, Object> update = new LinkedHashMap<>();
 update.put("add", add);
@@ -241,8 +246,8 @@ client.domain().renew("example1.com.ua", "2027-01-15", 1, cap);
 client.domain().restore("example1.com.ua", "500.00");    // your cap, not a published price
 
 // Contact
-client.contact().check(Arrays.asList("c1"));
-client.contact().info("c1", "pw");
+client.contact().check(Arrays.asList("REG-0001"));
+client.contact().info("REG-0001", "pw");
 Map<String, Object> contact = new LinkedHashMap<>();
 contact.put("name", "ACME");
 contact.put("city", "Kyiv");
@@ -251,15 +256,16 @@ contact.put("email", "contact@example.com");             // required by RFC 5733
 contact.put("authInfo", "pw");
 // contact.put("postalInfos", Arrays.asList(intBlock, locBlock));   // int + localized, each a Map
 // contact.put("disclose", discloseBlock);                          // RFC 5733 privacy
-client.contact().create("c1", contact);
+client.contact().create("REG-0001", contact);
 // No naming scheme of your own? Let the registry choose the handle and read it back. Every call
 // mints a fresh one, so a repeat is a second contact rather than a 2302 collision.
 String handle = client.contact().createAuto(contact).objectName();  // appears HERE and nowhere else
 Map<String, Object> postal = new LinkedHashMap<>();
-// A postalInfo is REPLACED, not merged: it carries name, city and cc whenever you touch it, because
-// the schema makes them required and a registry that replaces stores exactly what you sent. Inside
-// the block PRESENCE decides: a field you leave out keeps its value, and a field given as "" is
-// CLEARED — the only way to remove org, sp or pc.
+// A postalInfo is REPLACED, not merged. It carries name, city and cc whenever you touch it, because
+// the schema makes them required and a registry that replaces stores exactly what you sent — and for
+// the same reason a field you LEAVE OUT is deleted, not preserved. Send the whole block every time:
+// read the current one with contact().info() and apply your change to it. A field given as "" is
+// cleared explicitly, which is the only way to remove org, sp or pc.
 postal.put("name", "New Name");
 postal.put("city", "Lviv");
 postal.put("cc", "UA");
@@ -270,9 +276,9 @@ contactChange.put("postalInfo", postal);
 Map<String, Object> contactUpdate = new LinkedHashMap<>();
 contactUpdate.put("change", contactChange);
 contactUpdate.put("addStatuses", Arrays.asList("clientUpdateProhibited"));
-client.contact().update("c1", contactUpdate);
-client.contact().delete("c1");
-client.contact().transfer("request", "c1", "pw");
+client.contact().update("REG-0001", contactUpdate);
+client.contact().delete("REG-0001");
+client.contact().transfer("request", "REG-0001", "pw");
 
 // Host
 client.host().check(Arrays.asList("ns1.example.net"));
@@ -321,7 +327,11 @@ r.availability();    // Map<String, Boolean> for *:check
 r.statuses();        // ["ok"] or ["clientHold", ...] — from the status `s` attribute
 r.value("exDate");   // first element with that local name
 r.values("hostObj"); // all elements with that local name (nameservers are <domain:hostObj>)
-r.balance();         // Map: creditLimit, balance, availableCredit — or null
+r.balance();         // Map: creditLimit, balance, availableCredit — or null when this response is
+                     // not a balance answer. Read only from a balance infData, never from the
+                     // <fee:balance> a create or a renew echoes back
+r.threshold();       // the figure whose crossing queued a low-balance notice, or null on a plain
+                     // balance report — its presence is what tells a warning from a report
 r.prices();          // domain:info hint: {renewal={value=…, currency=UAH}, ...}
 r.fees();            // check+fee: per-name RFC 8748 prices (see above), empty when absent
 r.chargedFee();      // transform echo: {currency=UAH, fee=100.00} or null
@@ -481,7 +491,9 @@ The steps, in full:
 
 - `domain().createBuilder(name)`: `years`, `registrant`, `contact(role, …)`, `adminContact`,
   `techContact`, `billingContact`, `nameserver`, `nameservers`, `nameserverWithGlue`, `authInfo`,
-  `license`, `maxFee`, `dsRecord`, `dsRecordWithKey`, `keyRecord`, `maxSigLife`.
+  `license`, `maxFee`, `dsRecord`, `dsRecordWithKey`, `keyRecord`, `maxSigLife`. The role a
+  `contact(role, …)` takes is `admin`, `billing` or `tech` and nothing else — RFC 5731 closes that
+  set, so a fourth name refuses the whole command rather than adding a contact the registry ignores.
 - `domain().updateBuilder(name)`: `addNameserver(s)`, `remNameserver(s)`, `addContact`, `remContact`,
   `addStatus`, `remStatus`, `changeRegistrant`, `changeAuthInfo`, `clearAuthInfo`, `restore`,
   `license`, `maxFee`, `addDsRecord`, `remDsRecord`, `addKeyRecord`, `remKeyRecord`,

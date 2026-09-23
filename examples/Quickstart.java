@@ -10,11 +10,9 @@ import java.util.Map;
 /**
  * Minimal end-to-end example. Requires a live endpoint + credentials.
  *
- * <pre>
- * javac --release 8 -d out $(find src/main/java -name '*.java')
- * javac --release 8 -cp out -d out examples/Quickstart.java
- * EPP_CA=/path/to/registry-ca.pem java -cp out Quickstart
- * </pre>
+ *     javac --release 8 -d out $(find src/main/java -name '*.java')
+ *     javac --release 8 -cp out -d out examples/Quickstart.java
+ *     EPP_CA=/path/to/registry-ca.pem java -cp out Quickstart
  */
 public final class Quickstart {
 
@@ -23,10 +21,15 @@ public final class Quickstart {
 
         Config config = Config.builder("epp.registry.example", "EXAMPLE", "your-secret")
                 .port(700)          // default; override only if the endpoint moves
-                .lang("uk")         // localized result messages: en | uk | ua | ru
+                // The language of the registry's result messages. Which ones it offers is in its
+                // greeting, and a value it does not offer fails the login with 2102 - so read the
+                // greeting rather than assuming a set.
+                .lang("uk")
                 .readTimeout(30.0)  // SECONDS (default 30; a read waits at least one second)
-                // Port 700 presents a certificate from the registry's OWN private CA, so the CA
-                // bundle is REQUIRED - without it the handshake fails verification.
+                // Needed only where the endpoint presents a certificate from the registry's own
+                // private CA, which is in no trust store. Many registries present an ordinary
+                // browser-trusted certificate, and then there is nothing to set here: with no caFile
+                // the client trusts the JDK's own store. Ask your registry which applies.
                 .caFile(caFile != null ? caFile : "/path/to/registry-ca.pem")
                 .build();
 
