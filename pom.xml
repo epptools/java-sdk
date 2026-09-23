@@ -173,17 +173,55 @@
           </archive>
         </configuration>
       </plugin>
+
+      <!-- A bare `mvn deploy` has nowhere to go: this project declares no distributionManagement,
+           because publishing is the release profile's job and goes through the Central Portal plugin
+           there. Without this, `mvn deploy` fails late, after a full build, with a message about a
+           missing repository - and the obvious next move, adding a distributionManagement block, would
+           point at the retired OSSRH service. Skipped here so the failure is immediate and the comment
+           says where publishing actually lives. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-deploy-plugin</artifactId>
+        <version>3.1.2</version>
+        <configuration>
+          <skip>true</skip>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 
   <profiles>
-    <!-- Central requires a detached PGP signature for every artifact. Signing lives in a profile so
-         an ordinary `mvn install` needs no key and no passphrase; publish with
-         `mvn deploy -Prelease`, which signs the jar, the sources jar and the javadoc jar. -->
+    <!-- Everything publishing to Maven Central needs, in one profile, so an ordinary `mvn install`
+         needs no key, no passphrase and no account:
+             mvn deploy -Prelease
+         Central requires a detached PGP signature for every artifact, plus the sources and javadoc
+         jars the main build already attaches. The upload itself goes through the Central Portal
+         plugin below - the Portal replaced the old OSSRH staging service, and a legacy
+         `nexus-staging-maven-plugin` configuration no longer reaches anything. -->
     <profile>
       <id>release</id>
       <build>
         <plugins>
+          <!-- extensions=true is REQUIRED: it is what lets the plugin take over the deploy lifecycle
+               phase. Without it the build reports success and uploads nothing.
+               autoPublish=true releases the deployment instead of parking it in the Portal for a
+               human to press Publish; waitUntil=published makes the build wait for Central to finish
+               rather than exiting as soon as validation passes, so a failure there fails the job
+               instead of being discovered days later by a user who cannot resolve the artifact.
+               publishingServerId names the <server> entry that carries the Portal token. -->
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+            </configuration>
+          </plugin>
+
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-gpg-plugin</artifactId>

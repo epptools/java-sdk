@@ -1,0 +1,54 @@
+# Publish to Maven Central, on the same trigger the sibling libraries use.
+#
+# A pushed TAG publishes nothing. Packagist watches tags, npm and PyPI do not, and neither does this:
+# the trigger is a published GitHub Release, so the release is the step and the tag is only what it
+# points at. workflow_dispatch is here for a re-run after a failure that was not the code's fault.
+#
+# What this needs in the repository's secrets, all four:
+#   CENTRAL_TOKEN_USERNAME  } the user token generated at central.sonatype.com, NOT the account
+#   CENTRAL_TOKEN_PASSWORD  } password - the Portal issues a token pair for exactly this
+#   GPG_PRIVATE_KEY           the ASCII-armoured secret key, `gpg --armor --export-secret-keys <id>`
+#   GPG_PASSPHRASE            its passphrase, which maven-gpg-plugin reads in loopback mode
+#
+# And one thing that is not a secret and not done here: the namespace io.github.epptools has to be
+# verified once on the Portal, by creating a public repository named after the verification key it
+# gives you. Until that is done every upload is rejected, whatever the credentials say.
+
+name: publish
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The JDK that BUILDS is deliberately newer than the one the jar targets: the compiler is set to
+      # --release 8 in the pom, so a newer javac cannot slip a method that does not exist on 8 into the
+      # artefact. setup-java also writes the settings.xml server entry the publishing plugin reads.
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          server-id: central
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      # -Prelease is what brings in the signing and the Central Portal plugin; without it this would
+      # build the jar and upload nothing. The offline suite runs in the test phase either way, so a
+      # failing assertion stops the release before anything is uploaded.
+      - name: Build, sign and publish
+        run: mvn -B --no-transfer-progress deploy -Prelease
+        env:
+          MAVEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}

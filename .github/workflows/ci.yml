@@ -1,0 +1,67 @@
+# The offline suite, on every runtime this library claims to support.
+#
+# This repository had no CI at all until 2026-09-23, while its three sibling libraries each had one.
+# The suite was run only by tools/run-matrix.sh on a workstation, so a change that broke Java 8 - the
+# version the jar targets - was invisible to everybody who did not happen to run that script.
+#
+# The claim being tested is not "it compiles". It is "a jar built at --release 8 runs unchanged on
+# every release from 8 onward", and --release only promises a bytecode version and an API subset. The
+# second job is the one that actually tests it: build with a new JDK, then run on 8.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: Java ${{ matrix.java }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['11', '17', '21', '25']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+          cache: maven
+      # verify, not test: it also builds the sources and javadoc jars Maven Central requires, so a
+      # javadoc error is found here rather than during a release.
+      - run: mvn -B --no-transfer-progress verify
+
+  java8-runtime:
+    name: built on 21, run on 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both JDKs are installed, and the second setup-java call leaves ITS version as the default
+      # JAVA_HOME - so the compile uses the explicit path from the first, and the run uses the default.
+      - uses: actions/setup-java@v4
+        id: jdk21
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - uses: actions/setup-java@v4
+        id: jdk8
+        with:
+          java-version: '8'
+          distribution: 'temurin'
+
+      - name: Compile at --release 8 with the newer JDK
+        run: |
+          "${{ steps.jdk21.outputs.path }}/bin/javac" --release 8 -Xlint:-options \
+            -d out $(find src/main/java src/test/java -name '*.java')
+
+      - name: Run the suite on Java 8
+        run: |
+          "${{ steps.jdk8.outputs.path }}/bin/java" -cp out com.epptools.sdk.OfflineTest
