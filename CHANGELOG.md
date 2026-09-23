@@ -4,6 +4,17 @@ All notable changes to this library are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Waiting for the next release rather than earning one of its own. The four SDKs are one product in
+four languages and carry one version between them, so a change to this library alone does not move
+the number — it travels with whatever the four release together.
+
+- `Builder.deepCopy()` carried a `@SuppressWarnings("unchecked")` and performs no unchecked cast:
+  they are all in `deepCopyValue()`, which has its own. javac has no lint category for a redundant
+  suppression, so nothing in the build said so. A suppression that covers nothing trains the reader
+  to skim past the annotation, and the next real one reads as noise too.
+
 ## [1.1.2]
 
 First public release, and the only entry below. The four EppTools SDKs — PHP, Node.js, Python and
