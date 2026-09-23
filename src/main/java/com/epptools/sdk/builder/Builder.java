@@ -51,7 +51,6 @@ public abstract class Builder {
         sent = true;
     }
 
-    @SuppressWarnings("unchecked")
     static Map<String, Object> deepCopy(Map<String, Object> source) {
         Map<String, Object> out = new LinkedHashMap<>();
         for (Map.Entry<String, Object> e : source.entrySet()) {
