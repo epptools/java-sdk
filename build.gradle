@@ -1,7 +1,8 @@
-// Gradle build for the same artifact the pom.xml produces: io.github.epptools:epptools-sdk:1.1.1,
+// Gradle build for the same artifact the pom.xml produces: io.github.epptools:epptools-sdk:1.1.2,
 // compiled for Java 8, with no dependencies of any kind.
 //
-//   gradle build                  compile and jar
+//   gradle build                  compile, run the offline suite, jar
+//   gradle offlineTest            run the offline suite on its own
 //   gradle publish -Prelease      sign and publish (see the signing block)
 
 plugins {
@@ -11,11 +12,11 @@ plugins {
 }
 
 group = 'io.github.epptools'
-version = '1.1.1'
+version = '1.1.2'
 description = "Dependency-free Java client for EPP domain registries (RFC 5730-5734 over TLS), " +
         "with a registry's own extensions discovered from its greeting."
 
-// Without this the jar would be named after the directory (java-sdk-1.1.1.jar) and would not match
+// Without this the jar would be named after the directory (java-sdk-1.1.2.jar) and would not match
 // the Maven coordinates.
 base {
     archivesName = 'epptools-sdk'
@@ -27,7 +28,38 @@ java {
 }
 
 // No repositories and no dependencies: the library uses javax.net.ssl for the TLS transport and
-// javax.xml for DOM, both of which ship with the JDK.
+// javax.xml for DOM, both of which ship with the JDK. The suite in src/test/java has none either - it
+// is a plain main() with its own assertions and no test framework.
+
+// Run the offline suite as part of the build. Before this, `gradle build` compiled every assertion in
+// src/test/java and executed none of them, and only tools/run-matrix.sh ever ran the suite at all.
+//
+// A JavaExec rather than the Test task, because the suite has no test framework for Test to drive.
+// JavaExec forks, so the System.exit the suite ends with becomes this task's exit code and a failing
+// assertion fails the build. The working directory is the project root because the suite reads README.md
+// and docs/ to check that every version and install coordinate the documentation states agrees with
+// Version.VERSION.
+tasks.register('offlineTest', JavaExec) {
+    group = 'verification'
+    description = 'Run the dependency-free offline suite (com.epptools.sdk.OfflineTest).'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.epptools.sdk.OfflineTest'
+    workingDir = projectDir
+}
+
+// Hung off check rather than test: `gradle build` and `gradle check` both reach it, and the Test task
+// stays out of it entirely rather than being configured to drive a suite it cannot see.
+tasks.named('check') {
+    dependsOn 'offlineTest'
+}
+
+tasks.named('test') {
+    // Gradle 9 fails a Test task that finds test sources and discovers no tests, on the assumption that
+    // the discovery was misconfigured. Here it is correct: there is no framework for JUnit Platform to
+    // find, because the suite is a main() run by offlineTest above. Turned off with the reason stated
+    // rather than by adding a framework this library does not want.
+    failOnNoDiscoveredTests = false
+}
 
 tasks.withType(JavaCompile).configureEach {
     // release, not sourceCompatibility/targetCompatibility: it compiles against the Java 8 API as
@@ -82,7 +114,7 @@ publishing {
                     connection = 'scm:git:https://github.com/epptools/java-sdk.git'
                     developerConnection = 'scm:git:ssh://git@github.com/epptools/java-sdk.git'
                     url = 'https://github.com/epptools/java-sdk'
-                    tag = 'v1.1.1'
+                    tag = 'v1.1.2'
                 }
                 issueManagement {
                     system = 'GitHub Issues'
